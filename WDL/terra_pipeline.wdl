@@ -50,7 +50,9 @@ workflow boltonlab_CH {
         File fastq_one
         File fastq_two
         Boolean bam_input = false           # Default input is FASTQ files, but unaligned BAM is preferred
-        File unaligned_bam = ""
+        File? unaligned_bam
+        Boolean is_umi_concensus_unaligned = true       #using consensus bam (unaligned) as input (DEFAULT)
+        File? consensus_unaligned_bam 
         Boolean? aligned = false            # If input is an already aligned BAM file then set this flag
         File? aligned_bam_file
         File? aligned_bam_file_bai
@@ -69,8 +71,8 @@ workflow boltonlab_CH {
         File reference_sa
 
         # FASTQ Preprocessing
-        Boolean? umi_paired = true          # If the UMI is paired (R1 and R2) then set this flag
-        Int umi_length = 8
+        Boolean? umi_paired = false          # If the UMI is paired (R1 and R2) then set this flag
+        Int umi_length = 9
         Array[Int] min_reads = [1]          # The minimum number of reads that constitutes a "read family"
         Float? max_read_error_rate = 0.05   # If 5% of the reads within a "read family" does not match, removes the family
         Float? max_base_error_rate = 0.1    # If 10% of the bases are different than the majority, masks the base with N
@@ -162,69 +164,70 @@ workflow boltonlab_CH {
         Boolean? pilot = false
     }
 
+    if (!is_umi_concensus_unaligned) {
     # If the BAM file is already aligned and consensus sequencing was done, then alignment can be skipped
-    if (!aligned) {
+        if (!aligned) {
         # If the input is BAM, we need to check prune reads that have bad UMI information
-        if (platform == 'ArcherDX') {
-            if (bam_input) {
-                call bamToFastq {
-                    input: unaligned_bam = unaligned_bam
+            if (platform == 'ArcherDX') {
+                if (bam_input) {
+                    call bamToFastq {
+                        input: unaligned_bam = select_first([unaligned_bam, ""])
+                    }
                 }
-            }
 
             # Archer UMIs are not typical, they have a 13 bp Adapter after their 8 bp UMI
             # There needs to be some pruning involved before we can extract the UMIs
-            call filterArcherUmiLength as filterUMI {
-                input:
-                fastq1 = select_first([bamToFastq.fastq_one, fastq_one]),
-                fastq2 = select_first([bamToFastq.fastq_two, fastq_two]),
-                umi_length = umi_length
+                call filterArcherUmiLength as filterUMI {
+                    input:
+                    fastq1 = select_first([bamToFastq.fastq_one, fastq_one]),
+                    fastq2 = select_first([bamToFastq.fastq_two, fastq_two]),
+                    umi_length = umi_length
+                }
+                call bbmapRepair as repair {
+                    input:
+                    fastq1 = filterUMI.fastq1_filtered,
+                    fastq2 = filterUMI.fastq2_filtered
+                }
+                call fastqToBam as archer_fastq_to_bam {
+                    input:
+                    fastq1 = repair.fastq1_repair,
+                    fastq2 = repair.fastq2_repair,
+                    sample_name = tumor_sample_name,
+                    library_name = library,
+                    platform_unit = platform_unit,
+                    platform = platform
+                }
             }
-            call bbmapRepair as repair {
-                input:
-                fastq1 = filterUMI.fastq1_filtered,
-                fastq2 = filterUMI.fastq2_filtered
-            }
-            call fastqToBam as archer_fastq_to_bam {
-                input:
-                fastq1 = repair.fastq1_repair,
-                fastq2 = repair.fastq2_repair,
-                sample_name = tumor_sample_name,
-                library_name = library,
-                platform_unit = platform_unit,
-                platform = platform
-            }
-        }
 
-        # Since we only need to apply the above for Archer
-        if (!bam_input) {
-            call fastqToBam as fastq_to_bam {
-                input:
-                fastq1 = fastq_one,
-                fastq2 = fastq_two,
-                sample_name = tumor_sample_name,
-                library_name = library,
-                platform_unit = platform_unit,
-                platform = platform
+            # Since we only need to apply the above for Archer
+            if (!bam_input) {
+                call fastqToBam as fastq_to_bam {
+                    input:
+                    fastq1 = fastq_one,
+                    fastq2 = fastq_two,
+                    sample_name = tumor_sample_name,
+                    library_name = library,
+                    platform_unit = platform_unit,
+                    platform = platform
+                }
             }
-        }
 
-        # Removes UMIs from Reads and adds them as RX Tag
-        call extractUmis {
+            # Removes UMIs from Reads and adds them as RX Tag
+            call extractUmis {
             input:
             bam = select_first([archer_fastq_to_bam.bam, fastq_to_bam.bam, unaligned_bam]),
             read_structure = read_structure,
             umi_paired = umi_paired
-        }
+            }
 
-        # Mark Adapters
-        call markIlluminaAdapters {
+            # Mark Adapters
+            call markIlluminaAdapters {
             input:
             bam = extractUmis.umi_extracted_bam
-        }
+            }
 
-        # First Alignment
-        call umiAlign as align {
+            # First Alignment
+            call umiAlign as align {
             input:
             bam = markIlluminaAdapters.marked_bam,
             reference = reference,
@@ -235,19 +238,21 @@ workflow boltonlab_CH {
             reference_bwt = reference_bwt,
             reference_pac = reference_pac,
             reference_sa = reference_sa
-        }
+            }
 
-        # Create Read Families and Perform Consensus Calling
-        call groupReadsAndConsensus {
+            # Create Read Families and Perform Consensus Calling
+            call groupReadsAndConsensus {
             input:
             bam = align.aligned_bam,
             umi_paired = umi_paired,
-        }
+            }
+        }  
+    }  
 
-        # Realign the Consensus Called Reads
-        call realign {
-            input:
-            bam = groupReadsAndConsensus.consensus_bam,
+    # Realign the Consensus Called Reads
+    call realign {
+        input:
+            bam = select_first([groupReadsAndConsensus.consensus_bam, consensus_unaligned_bam]),
             reference = reference,
             reference_fai = reference_fai,
             reference_dict = reference_dict,
@@ -256,11 +261,11 @@ workflow boltonlab_CH {
             reference_bwt = reference_bwt,
             reference_pac = reference_pac,
             reference_sa = reference_sa
-        }
+     }
 
-        # Filter, Clip, and Collect QC Metrics
-        call filterClipAndCollectMetrics {
-            input:
+    # Filter, Clip, and Collect QC Metrics
+    call filterClipAndCollectMetrics {
+        input:
             bam = realign.consensus_aligned_bam,
             reference = reference,
             reference_fai = reference_fai,
@@ -273,8 +278,8 @@ workflow boltonlab_CH {
             target_intervals = target_intervals,
             description = tumor_sample_name,
             umi_paired = umi_paired
-        }
     }
+    
 
     # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
     call bqsrApply as bqsr {
