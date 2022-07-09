@@ -47,8 +47,8 @@ workflow boltonlab_CH {
         String platform = "ArcherDX"
         String platform_unit = "Illumina"
         String library = "LIBRARY"
-        File fastq_one
-        File fastq_two
+        File? fastq_one
+        File? fastq_two
         Boolean bam_input = false           # Default input is FASTQ files, but unaligned BAM is preferred
         File? unaligned_bam
         Boolean is_umi_concensus_unaligned = true       #using consensus bam (unaligned) as input (DEFAULT)
@@ -105,8 +105,8 @@ workflow boltonlab_CH {
 
         # Normal BAMs
         Boolean tumor_only = true                   # Defines if Normal BAMs should be used for Variant Calling
-        File normal_bam                             # TODO: Implement Normal
-        File normal_bam_bai
+        File? normal_bam                             # TODO: Implement Normal
+        File? normal_bam_bai
 
         # Pindel
         Int pindel_insert_size = 400
@@ -203,8 +203,8 @@ workflow boltonlab_CH {
             if (!bam_input) {
                 call fastqToBam as fastq_to_bam {
                     input:
-                    fastq1 = fastq_one,
-                    fastq2 = fastq_two,
+                    fastq1 = select_first([bamToFastq.fastq_one, fastq_one]),
+                    fastq2 = select_first([bamToFastq.fastq_two, fastq_two]),
                     sample_name = tumor_sample_name,
                     library_name = library,
                     platform_unit = platform_unit,
@@ -447,8 +447,8 @@ workflow boltonlab_CH {
               gnomad_tbi = normalized_gnomad_exclude_tbi,
               tumor_bam = bqsr.bqsr_bam,
               tumor_bam_bai = bqsr.bqsr_bam_bai,
-              normal_bam = normal_bam,
-              normal_bam_bai = normal_bam_bai,
+              normal_bam = select_first([normal_bam, ""]),
+              normal_bam_bai = select_first([normal_bam_bai, ""]),
               interval_list = chr_bed
             }
         }
@@ -511,8 +511,8 @@ workflow boltonlab_CH {
                 tumor_bam = bqsr.bqsr_bam,
                 tumor_bam_bai = bqsr.bqsr_bam_bai,
                 tumor_sample_name = tumor_sample_name,
-                normal_bam = normal_bam,
-                normal_bam = normal_bam_bai,
+                normal_bam = select_first([normal_bam, ""]),
+                normal_bam_bai = select_first([normal_bam_bai, ""]),
                 interval_bed = chr_bed,
                 min_var_freq = af_threshold
             }
@@ -584,8 +584,8 @@ workflow boltonlab_CH {
                 reference_fai = reference_fai,
                 tumor_bam = bqsr.bqsr_bam,
                 tumor_bam_bai = bqsr.bqsr_bam_bai,
-                normal_bam = normal_bam,
-                normal_bam_bai = normal_bam_bai,
+                normal_bam = select_first([normal_bam, ""]),
+                normal_bam_bai = select_first([normal_bam_bai, ""]),
                 interval_bed = chr_bed
             }
         }
@@ -672,8 +672,8 @@ workflow boltonlab_CH {
                 reference_dict = reference_dict,
                 tumor_bam = bqsr.bqsr_bam,
                 tumor_bam_bai = bqsr.bqsr_bam_bai,
-                normal_bam = normal_bam,
-                normal_bam_bai = normal_bam_bai,
+                normal_bam = select_first([normal_bam, ""]),
+                normal_bam_bai = select_first([normal_bam_bai, ""]),
                 region_file = chr_bed,
                 tumor_sample_name = tumor_sample_name,
                 normal_sample_name = "NORMAL",
