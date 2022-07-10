@@ -1369,7 +1369,7 @@ task filterClipAndCollectMetrics {
         memory: "6GB"
         cpu: cores
         bootDiskSizeGb: 10 + round(3*data_size + reference_size)
-        disks: "local-disk ~{10 + round(3*data_size + reference_size)} SSD"
+        disks: "local-disk ~{10 + round(6*data_size + reference_size)} SSD"
         preemptible: preemptible
         maxRetries: maxRetries
     }
