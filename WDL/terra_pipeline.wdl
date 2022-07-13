@@ -2967,6 +2967,7 @@ task normalFisher {
                 return(fisher.test(matrix(c(x[1], x[2], x[3], x[4]), ncol=2))$p.value)
             }
             })
+            df[,2]=sprintf("%1.0f", df[,2])
             write.table(df, file=args[2], row.names = F, quote = F, col.names = F, sep = "\t")
             ' > fisherTestInput.R
             bcftools annotate -a RD_AD.vcf.gz -c PON_RefDepth,PON_AltDepth $name.sample.vcf.gz -Oz -o $name.sample.pileup.vcf.gz;
@@ -3011,6 +3012,7 @@ task normalFisher {
                 return(fisher.test(matrix(c(x[1], x[2], ref, alt), ncol=2))$p.value)
             }
             })
+            df[,2]=sprintf("%1.0f", df[,2])
             write.table(df[, -c(9:10)], file=args[2], row.names = F, quote = F, col.names = F, sep = "\t")
             ' > fisherTestInput.R
             bcftools annotate -a RD_AD.vcf.gz -c PON_RefDepth,PON_AltDepth $name.sample.vcf.gz -Oz -o $name.sample.pileup.vcf.gz;
@@ -3050,6 +3052,7 @@ task normalFisher {
                 return(fisher.test(matrix(c(x[1], x[2], x[3], x[4]), ncol=2))$p.value)
             }
             })
+            df[,2]=sprintf("%1.0f", df[,2])
             write.table(df, file=args[2], row.names = F, quote = F, col.names = F, sep = "\t")
             ' > fisherTestInput.R
             bcftools annotate -a RD_AD.vcf.gz -c PON_RefDepth,PON_AltDepth $name.sample.vcf.gz -Oz -o $name.sample.pileup.vcf.gz;
@@ -3242,7 +3245,7 @@ task xgb_model {
         File pindel_full_vcf
         File pon
         String? pon_pvalue = "2.114164905e-6"
-        Boolean model = true
+        Boolean model = false
         String tumor_sample_name
     }
 
