@@ -41,6 +41,8 @@ task change_vcf_sm_tag {
         String sample_name
     }
 
+    String vcf_base_name = basename(vcf)
+
     Int cores = 4
     Int preemptible = 1
     Int maxRetries = 0
@@ -58,18 +60,15 @@ task change_vcf_sm_tag {
 
     command <<<
 
-        mv ~{vcf} = input.vcf.gz
-        mv ~{vcf_index} = input.vcf.gz.tbi
-
         echo -e '~{library}\t~{sample_name}' >samples.txt 
 
-        bcftools reheader --samples samples.txt -o ~{vcf} input.vcf.gz --threads ~{cores}
+        bcftools reheader --samples samples.txt -o  ~{vcf_base_name} ~{vcf} --threads ~{cores}
 
         tabix -p vcf ~{vcf}
     >>>
 
     output {
-        File output_vcf = "~{vcf}"
-        File output_vcf_index = "~{vcf_index}"
+        File output_vcf = "~{vcf_base_name}"
+        File output_vcf_index = "~{vcf_base_name}.tbi"
     }
 }
