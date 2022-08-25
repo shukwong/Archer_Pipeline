@@ -43,14 +43,14 @@ task change_vcf_sm_tag {
 
     String vcf_base_name = basename(vcf)
 
-    Int cores = 4
+    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size(vcf, "GB")
 
     runtime {
         docker: "dockerbiotools/bcftools:latest"
-        memory: "48GB"
+        memory: "16GB"
         cpu: cores
         bootDiskSizeGb: 10 + round(2*data_size)
         disks: "local-disk ~{10 + round(2*data_size)} SSD"
@@ -62,9 +62,8 @@ task change_vcf_sm_tag {
 
         echo -e '~{library}\t~{sample_name}' >samples.txt 
 
-        bcftools reheader --samples samples.txt -o  ~{vcf_base_name} ~{vcf} --threads ~{cores}
-
-        tabix -p vcf ~{vcf}
+        bcftools reheader --samples samples.txt -o  ~{vcf_base_name} ~{vcf} 
+        tabix -p vcf ~{vcf_base_name}
     >>>
 
     output {
