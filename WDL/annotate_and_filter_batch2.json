@@ -1,0 +1,19 @@
+{
+	"boltonlab_CH_annotate_filter.TSG_file":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/gene_census_TSG.txt",
+	"boltonlab_CH_annotate_filter.bolton_bick_vars":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/bick.bolton.vars3.txt",
+	"boltonlab_CH_annotate_filter.cosmic_dir_zip":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/cosmic_zip.zip",
+	"boltonlab_CH_annotate_filter.matches2":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/matches.2.c.p.txt",
+	"boltonlab_CH_annotate_filter.mut2_bick":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/topmed.n2.mutation.1.c.p.txt",
+	"boltonlab_CH_annotate_filter.mut2_kelly":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/kelly.n2.mutation.1.c.p.txt",
+	"boltonlab_CH_annotate_filter.oncoKB_curated":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/all_curated_genes_v4.0.tsv",
+	"boltonlab_CH_annotate_filter.pd_annotation_file":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/pd_table_kbreview_bick_trunc3.txt",
+	"boltonlab_CH_annotate_filter.platform":"Illumina",
+	"boltonlab_CH_annotate_filter.pon_pvalue":"2.114164905e-6",
+	"boltonlab_CH_annotate_filter.truncating":"gs://nih-nci-dceg-chernobyl/Archer_Pipeline/annotation_files/AnnotatePD_Files/BB.truncating.more.than.1.tsv",
+	"boltonlab_CH_annotate_filter.tumor_sample_name":"",
+	"boltonlab_CH_annotate_filter.vardict_vcf":"",
+	"boltonlab_CH_annotate_filter.lofreq_vcf":"",
+	"boltonlab_CH_annotate_filter.pindel_vcf":"",
+	"boltonlab_CH_annotate_filter.pon_vcf":"",
+	"boltonlab_CH_annotate_filter.mutect_vcf":""
+}
