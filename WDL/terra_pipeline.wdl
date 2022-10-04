@@ -50,7 +50,9 @@ workflow boltonlab_CH {
         File fastq_one
         File fastq_two
         Boolean bam_input = false           # Default input is FASTQ files, but unaligned BAM is preferred
-        File unaligned_bam = ""
+        File? unaligned_bam = ""    
+        Boolean is_umi_concensus_unaligned = true       #using consensus bam (unaligned) as input (DEFAULT)
+        File? consensus_unaligned_bam               
         Boolean? aligned = false            # If input is an already aligned BAM file then set this flag
         File? aligned_bam_file
         File? aligned_bam_file_bai
@@ -59,6 +61,8 @@ workflow boltonlab_CH {
         File target_intervals               # Interval List
         Int? mem_limit_override = 6         # Some applications will require more memory depending on BAM size and BED size... (in GB)
                                             # Need to account for these types of errors
+       
+                                      
 
         # Reference
         File reference
@@ -167,13 +171,14 @@ workflow boltonlab_CH {
         Boolean? pilot = false
     }
 
+  if (!is_umi_concensus_unaligned) { #we could start with unaligned but umi concensus bam
     # If the BAM file is already aligned and consensus sequencing was done, then alignment can be skipped
     if (!aligned) {
         # If the input is BAM, we need to check prune reads that have bad UMI information
         if (platform == 'ArcherDX') {
             if (bam_input) {
                 call bamToFastq {
-                    input: unaligned_bam = unaligned_bam
+                    input: unaligned_bam = select_first([unaligned_bam, ""])
                 }
             }
 
@@ -314,6 +319,7 @@ workflow boltonlab_CH {
             }
         }
     }
+  }
 
     # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
     call bqsrApply as bqsr {
@@ -1456,7 +1462,7 @@ task filterClipAndCollectMetrics {
     Int preemptible = 1
     Int maxRetries = 0
     Int space_needed_gb = ceil(10 + 2 * data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
+    Float memory = select_first([mem_limit_override, if 8.0 * data_size > 6.0 then ceil(8.0 * data_size) else 6.0])
     Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
 
     runtime {
