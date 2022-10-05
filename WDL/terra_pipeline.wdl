@@ -171,7 +171,7 @@ workflow boltonlab_CH {
         Boolean? pilot = false
     }
 
-  if (!is_umi_concensus_unaligned) { #we could start with unaligned but umi concensus bam
+ if (!is_umi_concensus_unaligned) { #we could start with unaligned but umi concensus bam
     # If the BAM file is already aligned and consensus sequencing was done, then alignment can be skipped
     if (!aligned) {
         # If the input is BAM, we need to check prune reads that have bad UMI information
@@ -263,7 +263,7 @@ workflow boltonlab_CH {
                 umi_paired = umi_paired,
             }
         }
-
+    
         if (!has_umi) {
             # Mark Adapters
             call markIlluminaAdapters as markAdapters_NoUMI{
@@ -271,7 +271,7 @@ workflow boltonlab_CH {
                 bam = select_first([archer_fastq_to_bam.bam, fastq_to_bam.bam, unaligned_bam]),
             }
         }
-
+    }
         # Realign the Consensus Called Reads
         call realign {
             input:
@@ -319,7 +319,7 @@ workflow boltonlab_CH {
             }
         }
     }
-  }
+  
 
     # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
     call bqsrApply as bqsr {
