@@ -272,10 +272,12 @@ workflow boltonlab_CH {
             }
         }
     }
+
+ }
         # Realign the Consensus Called Reads
         call realign {
             input:
-            bam = select_first([groupReadsAndConsensus.consensus_bam, markAdapters_NoUMI.marked_bam]),
+            bam = select_first([groupReadsAndConsensus.consensus_bam, markAdapters_NoUMI.marked_bam, consensus_unaligned_bam]),
             reference = reference,
             reference_fai = reference_fai,
             reference_dict = reference_dict,
@@ -318,7 +320,7 @@ workflow boltonlab_CH {
                 umi_paired = umi_paired
             }
         }
-    }
+    
   
 
     # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
