@@ -459,22 +459,22 @@ workflow boltonlab_CH {
     }
 
     # Perform Somalier
-    call createSomalierVcf {
-        input:
-        interval_bed = interval_to_bed.interval_bed,
-        chrom_sizes = chrom_sizes,
-        af_only_snp_only_vcf = af_only_snp_only_vcf,
-        reference = reference
-    }
+#    call createSomalierVcf {
+#        input:
+#        interval_bed = interval_to_bed.interval_bed,
+#        chrom_sizes = chrom_sizes,
+#        af_only_snp_only_vcf = af_only_snp_only_vcf,
+#        reference = reference
+#    }
 
-    call somalier {
-        input:
-        somalier_vcf = createSomalierVcf.somalier_vcf,
-        reference = reference,
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai,
-        sample_name = tumor_sample_name
-    }
+#    call somalier {
+#        input:
+#        somalier_vcf = createSomalierVcf.somalier_vcf,
+#        reference = reference,
+#        bam = bqsr.bqsr_bam,
+#        bam_bai = bqsr.bqsr_bam_bai,
+#        sample_name = tumor_sample_name
+#    }
 
     # In order to parallelize as much as the workflow as possible, we analyze by chromosome
     call splitBedToChr as split_bed_to_chr {
@@ -1048,7 +1048,7 @@ workflow boltonlab_CH {
         File tumor_verify_bam_id_depth = verifyBamId.verify_bam_id_depth
         File fastqc_html = fastQC.fastqc_html
         File fastqc = fastQC.fastqc
-        File somalier_out = somalier.somalier_out
+        #File somalier_out = somalier.somalier_out
 
 
         # Mutect
