@@ -335,8 +335,8 @@ workflow boltonlab_CH {
         intervals = bqsr_intervals,
         known_sites = bqsr_known_sites,
         known_sites_tbi = bqsr_known_sites_tbi,
-        output_name = tumor_sample_name
-        tumor_sample_name = tumor_sample_name
+        output_name = tumor_sample_name,
+        tumor_sample_name = tumor_sample_name,
         seq_sample_id = seq_sample_id
     }
 
