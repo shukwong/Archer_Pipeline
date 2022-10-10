@@ -58,7 +58,6 @@ workflow boltonlab_CH {
         File? aligned_bam_file_bai
         Array[String] read_structure        # Used for the UMI processing see: https://github.com/fulcrumgenomics/fgbio/wiki/Read-Structures
         String tumor_sample_name
-        String seq_sample_id
         File target_intervals               # Interval List
         Int? mem_limit_override = 6         # Some applications will require more memory depending on BAM size and BED size... (in GB)
                                             # Need to account for these types of errors
@@ -335,9 +334,7 @@ workflow boltonlab_CH {
         intervals = bqsr_intervals,
         known_sites = bqsr_known_sites,
         known_sites_tbi = bqsr_known_sites_tbi,
-        output_name = tumor_sample_name,
-        tumor_sample_name = tumor_sample_name,
-        seq_sample_id = seq_sample_id
+        output_name = tumor_sample_name
     }
 
     # Obtains Alignment Metrics and Insert Size Metrics
@@ -1590,8 +1587,6 @@ task bqsrApply {
         File bam
         File bam_bai
         String output_name = "final"
-        String tumor_sample_name 
-        String seq_sample_id
         Array[File] known_sites
         Array[File] known_sites_tbi  # secondaryFiles...
         Array[String] intervals = ["chr1", "chr2", "chr3", "chr4", "chr5","chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22", "chrX", "chrY"]
@@ -1618,12 +1613,7 @@ task bqsrApply {
 
     command <<<
         /gatk/gatk --java-options -Xmx16g BaseRecalibrator -O bqsr.table ~{sep=" " prefix("-L ", intervals)} -R ~{reference} -I ~{bam} ~{sep=" " prefix("--known-sites ", known_sites)}
-        /gatk/gatk --java-options -Xmx16g ApplyBQSR -O bqsr.bam ~{sep=" " prefix("--static-quantized-quals ", [10, 20, 30])} -R ~{reference} -I ~{bam} -bqsr bqsr.table
-        header=$(samtools view -H bams/~{tumor_sample_name}.bam | grep SM)
-        header=${header/SM:~{seq_sample_id}/SM:~{tumor_sample_name}}
-        header=${header//$"\t"/"\t"}
-        samtools addreplacerg -w -r  "$header" -o ~{output_name}.bam  bqsr.bam
-        samtools index ~{output_name}.bam ~{output_name}.bai
+        /gatk/gatk --java-options -Xmx16g ApplyBQSR -O ~{output_name}.bam ~{sep=" " prefix("--static-quantized-quals ", [10, 20, 30])} -R ~{reference} -I ~{bam} -bqsr bqsr.table
     >>>
 
     output {
