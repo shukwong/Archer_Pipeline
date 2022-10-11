@@ -44,25 +44,14 @@ struct VepSpliceAIPlugin {
 workflow boltonlab_CH {
     input {
         # Sequence Information
-        String platform = "ArcherDX"
-        String platform_unit = "Illumina"
-        String library = "LIBRARY"
-        File fastq_one
-        File fastq_two
-        Boolean bam_input = false           # Default input is FASTQ files, but unaligned BAM is preferred
-        File? unaligned_bam = ""    
-        Boolean is_umi_concensus_unaligned = true       #using consensus bam (unaligned) as input (DEFAULT)
-        File? consensus_unaligned_bam               
-        Boolean? aligned = false            # If input is an already aligned BAM file then set this flag
-        File? aligned_bam_file
-        File? aligned_bam_file_bai
-        Array[String] read_structure        # Used for the UMI processing see: https://github.com/fulcrumgenomics/fgbio/wiki/Read-Structures
+        String platform = "Illumina"
+        File bqsr_bam_file
+        File bqsr_bai_file
         String tumor_sample_name
         File target_intervals               # Interval List
         Int? mem_limit_override = 6         # Some applications will require more memory depending on BAM size and BED size... (in GB)
                                             # Need to account for these types of errors
-       
-                                      
+                                          
 
         # Reference
         File reference
@@ -74,25 +63,7 @@ workflow boltonlab_CH {
         File reference_pac
         File reference_sa
 
-        # FASTQ Preprocessing
-        Boolean has_umi = true
-        Boolean? umi_paired = true          # If the UMI is paired (R1 and R2) then set this flag
-        Int umi_length = 8
-        Array[Int] min_reads = [1]          # The minimum number of reads that constitutes a "read family"
-        Float? max_read_error_rate = 0.05   # If 5% of the reads within a "read family" does not match, removes the family
-        Float? max_base_error_rate = 0.1    # If 10% of the bases are different than the majority, masks the base with N
-        Int min_base_quality = 1            # Any base less than QUAL 1 will be masked with N
-        Float max_no_call_fraction = 0.5    # Maximum fraction of no-calls (N) in the read after filtering
-
-        # BQSR
-        Array[File] bqsr_known_sites
-        Array[File] bqsr_known_sites_tbi
-        Array[String] bqsr_intervals
-
-        # QC
-        # These are essentially coordinates for regions you were able to design probes for in the reagent.
-        # Typically the reagent provider has this information available in bed format and it can be converted to an interval_list with Picard BedToIntervalList.
-        # Astrazeneca also maintains a repo of baits for common sequencing reagents available at https://github.com/AstraZeneca-NGS/reference_data
+        #QC
         File bait_intervals
         Array[LabelledFile] per_base_intervals      # If QC needs to be done at a per-base resolution
         Array[LabelledFile] per_target_intervals    # If QC needs to be done at a per-target resolution
@@ -171,171 +142,13 @@ workflow boltonlab_CH {
         Boolean? pilot = false
     }
 
- 
-    if (!aligned) {
-        if (!is_umi_concensus_unaligned) {
-        # If the input is BAM, we need to check prune reads that have bad UMI information
-        if (platform == 'ArcherDX') {
-            if (bam_input) {
-                call bamToFastq {
-                    input: unaligned_bam = select_first([unaligned_bam, ""])
-                }
-            }
-
-            # Archer UMIs are not typical, they have a 13 bp Adapter after their 8 bp UMI
-            # There needs to be some pruning involved before we can extract the UMIs
-            call filterArcherUmiLength as filterUMI {
-                input:
-                fastq1 = select_first([bamToFastq.fastq_one, fastq_one]),
-                fastq2 = select_first([bamToFastq.fastq_two, fastq_two]),
-                umi_length = umi_length
-            }
-            call bbmapRepair as repair {
-                input:
-                fastq1 = filterUMI.fastq1_filtered,
-                fastq2 = filterUMI.fastq2_filtered
-            }
-            call fastqToBam as archer_fastq_to_bam {
-                input:
-                fastq1 = repair.fastq1_repair,
-                fastq2 = repair.fastq2_repair,
-                sample_name = tumor_sample_name,
-                library_name = library,
-                platform_unit = platform_unit,
-                platform = platform
-            }
-        }
-
-        # Since we only need to apply the above for Archer
-        if (!bam_input) {
-            call fastqToBam as fastq_to_bam {
-                input:
-                fastq1 = fastq_one,
-                fastq2 = fastq_two,
-                sample_name = tumor_sample_name,
-                library_name = library,
-                platform_unit = platform_unit,
-                platform = platform
-            }
-        }
-        
-
-        if (has_umi) {
-            # Removes UMIs from Reads and adds them as RX Tag
-            if (platform != 'MGI') {
-                call extractUmis {
-                    input:
-                    bam = select_first([archer_fastq_to_bam.bam, fastq_to_bam.bam, unaligned_bam]),
-                    read_structure = read_structure,
-                    umi_paired = umi_paired
-                }
-                # Mark Adapters
-                call markIlluminaAdapters as markAdapters{
-                    input:
-                    bam = extractUmis.umi_extracted_bam
-                }
-            }
-
-            if (platform == 'MGI') {
-                call markIlluminaAdapters as markAdapters_MGI{
-                    input:
-                    bam = select_first([fastq_to_bam.bam, unaligned_bam])
-                }
-            }
-
-            # First Alignment
-            call umiAlign as align {
-                input:
-                bam = select_first([markAdapters.marked_bam, markAdapters_MGI.marked_bam]),
-                reference = reference,
-                reference_fai = reference_fai,
-                reference_dict = reference_dict,
-                reference_amb = reference_amb,
-                reference_ann = reference_ann,
-                reference_bwt = reference_bwt,
-                reference_pac = reference_pac,
-                reference_sa = reference_sa
-            }
-
-            # Create Read Families and Perform Consensus Calling
-            call groupReadsAndConsensus {
-                input:
-                bam = align.aligned_bam,
-                umi_paired = umi_paired,
-            }
-        }
-    
-        if (!has_umi) {
-            # Mark Adapters
-            call markIlluminaAdapters as markAdapters_NoUMI{
-                input:
-                bam = select_first([archer_fastq_to_bam.bam, fastq_to_bam.bam, unaligned_bam]),
-            }
-        }
-       }
-    
-
-        # Realign the Consensus Called Reads
-        call realign {
-            input:
-            bam = select_first([groupReadsAndConsensus.consensus_bam, markAdapters_NoUMI.marked_bam, consensus_unaligned_bam]),
-            reference = reference,
-            reference_fai = reference_fai,
-            reference_dict = reference_dict,
-            reference_amb = reference_amb,
-            reference_ann = reference_ann,
-            reference_bwt = reference_bwt,
-            reference_pac = reference_pac,
-            reference_sa = reference_sa
-        }
-
-        if (has_umi) {
-            # Filter, Clip, and Collect QC Metrics
-            call filterClipAndCollectMetrics {
-                input:
-                bam = realign.consensus_aligned_bam,
-                reference = reference,
-                reference_fai = reference_fai,
-                reference_dict = reference_dict,
-                min_reads = min_reads,
-                max_read_error_rate = max_read_error_rate,
-                max_base_error_rate = max_base_error_rate,
-                min_base_quality = min_base_quality,
-                max_no_call_fraction = max_no_call_fraction,
-                target_intervals = target_intervals,
-                description = tumor_sample_name,
-                umi_paired = umi_paired
-            }
-        }
-
-        if (!has_umi) {
-            # Filter, Clip, and Collect QC Metrics
-            call clipAndCollectMetrics {
-                input:
-                bam = realign.consensus_aligned_bam,
-                reference = reference,
-                reference_fai = reference_fai,
-                reference_dict = reference_dict,
-                target_intervals = target_intervals,
-                description = tumor_sample_name,
-                umi_paired = umi_paired
-            }
-        }
-      
-    }
 
     # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
-    call bqsrApply as bqsr {
+    # change it to just copying the input bam as a heck
+    call bqsr_copy as bqsr {
         input:
-        reference = reference,
-        reference_fai = reference_fai,
-        reference_dict = reference_dict,
-        bam = select_first([filterClipAndCollectMetrics.clipped_bam, aligned_bam_file, clipAndCollectMetrics.clipped_bam]),
-        bam_bai = select_first([filterClipAndCollectMetrics.clipped_bam_bai, aligned_bam_file_bai, clipAndCollectMetrics.clipped_bam_bai]),
-        intervals = bqsr_intervals,
-        known_sites = bqsr_known_sites,
-        known_sites_tbi = bqsr_known_sites_tbi,
-        output_name = tumor_sample_name
+        bam = bqsr_bam_file,
+        bai = bqsr_bai_file
     }
 
     # Obtains Alignment Metrics and Insert Size Metrics
@@ -1032,10 +845,6 @@ workflow boltonlab_CH {
     }
 
     output {
-        # Alignments
-        File? aligned_bam = select_first([filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam])
-        File bqsr_bam = bqsr.bqsr_bam
-
         # Tumor QC
         File tumor_insert_size_metrics = collectAllMetrics.insert_size_metrics
         File tumor_alignment_summary_metrics = collectAllMetrics.alignment_summary_metrics
@@ -1051,7 +860,6 @@ workflow boltonlab_CH {
         File fastqc_html = fastQC.fastqc_html
         File fastqc = fastQC.fastqc
         #File somalier_out = somalier.somalier_out
-
 
         # Mutect
         File mutect_full =  merge_mutect_full.merged_vcf                                # Raw Mutect Ouput
@@ -1578,6 +1386,36 @@ task clipAndCollectMetrics {
         File clipped_bam = "clipped.bam"
         File clipped_bam_bai = "clipped.bai"
         Array[File] duplex_seq_metrics = glob("duplex_seq.metrics.*")
+    }
+}
+
+task bqsr_copy {
+    input {
+        File bam
+        File bai
+    }
+
+    Float data_size = size([bam, bai], "GB")
+    Int preemptible = 1
+    Int maxRetries = 0
+    Int space_needed_gb = ceil(1 + data_size)
+
+    runtime {
+        cpu: 1
+        docker: "ubuntu:bionic"
+        memory: "4GB"
+        disks: "local-disk ~{space_needed_gb} SSD"
+        preemptible: preemptible
+        maxRetries: maxRetries
+    }
+
+    command <<<
+        ls ~{bam}
+    >>>
+
+    output {
+        File bqsr_bam = "~{bam}"
+        File bqsr_bam_bai = "~{bai}"
     }
 }
 
