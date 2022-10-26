@@ -2352,6 +2352,8 @@ task lofreqTumorOnly {
         samtools index output.indel.bam
         /opt/lofreq/bin/lofreq call-parallel --pp-threads ~{cores} -A -B -f ~{reference} --call-indels --bed ~{interval_bed} -o ~{output_name} output.indel.bam --force-overwrite
         bgzip ~{output_name} && tabix ~{output_name}.gz
+        rm output.indel.bam
+        rm output.indel.bam.bai
     >>>
 
     output {
@@ -2980,6 +2982,8 @@ task vep {
         ${custom_annotation}
 
         bgzip ~{annotated_path} && tabix ~{annotated_path}.gz
+
+        rm -rf vep_zip/
     >>>
 
     output {

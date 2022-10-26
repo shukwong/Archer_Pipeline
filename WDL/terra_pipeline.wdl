@@ -1506,6 +1506,9 @@ task filterClipAndCollectMetrics {
         else
             echo "Sample not UMI Paired" > duplex_seq.metrics.txt
         fi
+
+        rm consensus_filtered.bam
+        rm consensus_filtered.bai
     >>>
 
     output {
@@ -2514,6 +2517,8 @@ task lofreqTumorOnly {
         samtools index output.indel.bam
         /opt/lofreq/bin/lofreq call-parallel --pp-threads ~{cores} -A -B -f ~{reference} --call-indels --bed ~{interval_bed} -o ~{output_name} output.indel.bam --force-overwrite
         bgzip ~{output_name} && tabix ~{output_name}.gz
+        rm output.indel.bam
+        rm output.indel.bam.bai
     >>>
 
     output {
@@ -3142,6 +3147,8 @@ task vep {
         ${custom_annotation}
 
         bgzip ~{annotated_path} && tabix ~{annotated_path}.gz
+
+        rm -rf vep_zip/
     >>>
 
     output {

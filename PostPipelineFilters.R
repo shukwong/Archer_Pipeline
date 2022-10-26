@@ -6,34 +6,46 @@ library(stringr)
 library(jsonlite)
 library(sqldf)
 
-bolton_bick_vars <- "/Users/irenaeuschan/Documents/Irenaeus/data/bick.bolton.vars3.txt"
-cosmic_hotspots <- "/Users/irenaeuschan/Documents/Irenaeus/data/COSMIC.heme.myeloid.hotspot.tsv"
-TSG_list <- "/Users/irenaeuschan/Documents/Irenaeus/data/TSG_only_list.tsv"
+#bolton_bick_vars <- "/Users/irenaeuschan/Documents/Irenaeus/data/bick.bolton.vars3.txt"
+bolton_bick_vars <- "/Volumes/DCEG_REBC_CH/Archer_Pipeline/WDL/AnnotatePD\ Files/bick.bolton.vars3.txt"
+#cosmic_hotspots <- "/Users/irenaeuschan/Documents/Irenaeus/data/COSMIC.heme.myeloid.hotspot.tsv"
+cosmic_hotspots <- "/Volumes/DCEG_REBC_CH/Archer_Pipeline/WDL/AnnotatePD\ Files/COSMIC.heme.myeloid.hotspot.tsv"
+#TSG_list <- "/Users/irenaeuschan/Documents/Irenaeus/data/TSG_only_list.tsv"
+TSG_list <-  "/Volumes/DCEG_REBC_CH/Archer_Pipeline/WDL/AnnotatePD\ Files/TSG_only_list.tsv"
 #Pilot <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/pilot.archer.combined.FPpass.tsv"
 #Pilot <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/pilot.mgi.combined.FPpass.tsv"
 #Trios <- "/Users/irenaeuschan/Documents/Irenaeus/MGI_Yizhe/trios.combined.tsv"
 #Dilution <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/dilution.combined.tsv"
 #Final <- "/Volumes/bolton/Active/projects/ProstateCancer/TERRA/prostate.final.FPpass.tsv"
 #Prostate <- "/Users/irenaeuschan/Documents/Irenaeus/ProstateCancer/prostate.final.combined.FPpass.filtered_KB2.csv"
-Final <- "/Volumes/bolton/Active/projects/GoodCell/TERRA/GoodCell.combined.FPpass.tsv"
-Final <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/final.combined.FPpass.tsv"
-Orig <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/data/variant_review_IC_31722_KB_complete_updated.csv"
+#Final <- "/Volumes/bolton/Active/projects/GoodCell/TERRA/GoodCell.combined.FPpass.tsv"
+#Final <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/final.combined.FPpass.tsv"
+#Orig <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/data/variant_review_IC_31722_KB_complete_updated.csv"
 #Alex_Filter <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/alex_filter.csv"
 # alex_filter <- read.csv(Alex_Filter, header = TRUE)
+
+Final <- "/Volumes/DCEG_REBC_CH/TMP/final.tsv.gz"
 final <- read.table(Final, sep='\t', header = TRUE)
+cat (paste("starting number of variants ", nrow(final)) )
+
 
 # Remove all variants that fail our general filter "all_fp_pass_XGB"
 final <- final %>% dplyr::filter(as.logical(all_fp_pass_XGB))
+cat (paste("all_fp_pass_XGB TRUE", nrow(final)) )
+
 
 # Remove any weird Lofreq N calls
 final <- final %>% dplyr::filter(ifelse(grepl('N', ALT), FALSE, TRUE))
 final <- final %>% dplyr::filter(ifelse(grepl('N', REF), FALSE, TRUE))
+cat (paste("Remove any weird Lofreq N calls", nrow(final)) )
 
 # Remove Off-Target & Introns          
 final <- final %>% dplyr::filter(Consequence_VEP != "")
+cat (paste("Remove Off-Target & Introns", nrow(final)) )
 
 # Remove Duplicated Rows
 final <- final[!(duplicated(final) | duplicated(final, fromLast = TRUE)), ]
+cat (paste("Remove Duplicated Rows", nrow(final)) )
 
 # For the Dilution Data Only
 #final <- final %>% mutate(Sample = ifelse(grepl("T", SN_TAG, fixed = TRUE), paste0(unlist(lapply(strsplit(SN_TAG, "T", fixed = TRUE), "[[", 1)), "T"), SN_TAG))
@@ -57,6 +69,7 @@ final <- final %>% filter(as.logical(pon_FP_pass_XGB),
                           as.logical(long_indel_pass_XGB), 
                           as.logical(di_tri_vard_pass_XGB),
                           as.logical(bcbio_pass_XGB))
+cat (paste("Remove those that failed FP filter", nrow(final)) )
 
 # Then filter out samples that failed Varscan's FP filter
 final <- final %>% filter(FP_Filter_DETP20_XGB == 0,
@@ -65,6 +78,7 @@ final <- final %>% filter(FP_Filter_DETP20_XGB == 0,
                           FP_Filter_NRC_XGB == 0,
                           FP_Filter_PB10_XGB == 0,
                           FP_Filter_RLD25_XGB == 0)
+cat (paste("Remove those that failed Varscan's FP filter", nrow(final)) )
 
 # Calculate average VAF and average Alt Depth
 final$average_AF <- final %>% dplyr::select(gt_AF_Mutect, gt_AF_Lofreq, gt_AF_Vardict) %>% rowMeans(., na.rm=TRUE)
@@ -72,15 +86,19 @@ final$average_AD <- final %>% dplyr::select(gt_AD_alt_Mutect, gt_AD_alt_Lofreq, 
 
 # Filter out variants lower than 0.001 VAF because hard to tell the difference between artifact and real
 final <- final %>% filter(average_AF >= 0.001)
+cat (paste("Filter out variants lower than 0.001 VAF because hard to tell the difference between artifact and real", nrow(final)) )
 
 # Calculate the Median VAF per Variant
 final <- final %>% left_join(., final %>% group_by(key) %>% summarise(median_VAF = median(average_AF)))
 
+
 # Filter out samples that failed MCV4 if it had an Alt Depth above 5
 final <- final %>% filter(ifelse(FP_Filter_MVC4_XGB == 1 & average_AD > 5, FALSE, TRUE))
+cat (paste("Filter out samples that failed MCV4 if it had an Alt Depth above 5", nrow(final)) )
 
 # Filter out samples that failed SB1 only if it had an Alt Depth above 10
 final <- final %>% filter(ifelse(FP_Filter_SB1_XGB == 1 & average_AD > 10, FALSE, TRUE))
+cat (paste("Filter out samples that failed SB1 only if it had an Alt Depth above 10", nrow(final)) )
 
 # Recurrent Filter Parameters
 # 80 Samples have R882H Mutation in ArcherDX Dataset
@@ -107,17 +125,26 @@ final <- final %>%
     FILTER_Mutect != "" & FILTER_Lofreq != "" & FILTER_Vardict != "" ~ 'mutect;lofreq;vardict',
   )) 
 
-# Filter our non PD variants
-final <- final %>% dplyr::filter(ch_pd2 >= 1)
+### NOT USED: Filter our non PD variants
+# final <- final %>% dplyr::filter(ch_pd2 >= 1)
+
 # Has to be PASS by at least ONE caller
 final <- final %>% dplyr::filter(as.logical(PASS_BY_1))
+cat (paste("Has to be PASS by at least ONE caller", nrow(final)) )
+
 # Filter out Low VAF Mutect Calls
-final <- final %>% filter(!(CALL_BY_CALLER == "mutect" & average_AF < 0.01))
+### modified to 0.005 
+final <- final %>% filter(!(CALL_BY_CALLER == "mutect" & average_AF < 0.005))
+cat (paste("Filter out Low VAF Mutect Calls", nrow(final)) )
+
 # Throw out Silent Mutations
 final <- final %>% filter(Consequence_VEP != "synonymous_variant")
+cat (paste("Throw out Silent Mutations", nrow(final)) )
 
 # Strand Bias Filter - 90/10
 final <- final %>% rowwise() %>% mutate(pass_strand_bias = ifelse(sum(pass_strand_bias_Mutect, pass_strand_bias_Lofreq, pass_strand_bias_Vardict, na.rm = TRUE) >= 1, TRUE, FALSE))
+cat (paste("Strand Bias Filter - 90/10", nrow(final)) )
+
 # Strand Bias Filter - Minimum Counts
 final <- final %>% mutate(enough_strand_evidence_Mutect = ifelse(gt_AD_alt_Mutect >= 5 & (AltFwd_Mutect_Raw == 0 | AltRev_Mutect_Raw == 0), 0, 1),
                  enough_strand_evidence_Lofreq = ifelse(gt_AD_alt_Lofreq >= 5 & (AltFwd_Lofreq_Raw == 0 | AltRev_Lofreq_Raw == 0), 0, 1),
@@ -130,6 +157,8 @@ final <- final %>% mutate(min_alt_count_Lofreq = ifelse((AltFwd_Lofreq_Raw+AltRe
 final <- final %>% mutate(min_alt_count_Vardict = ifelse((AltFwd_Vardict_Raw+AltRev_Vardict_Raw) < 5, 0, 1))
 final <- final %>% rowwise() %>% mutate(pass_min_alt_count = ifelse(sum(min_alt_count_Mutect, min_alt_count_Lofreq, min_alt_count_Vardict, na.rm = TRUE) >= 1, TRUE, FALSE))
 final <- final %>% filter(pass_min_alt_count == TRUE) %>% dplyr::select(-min_alt_count_Mutect, -min_alt_count_Lofreq, -min_alt_count_Vardict)
+cat (paste("Strand Bias Filter - Minimum Counts", nrow(final)) )
+
 
 # Redefine homopolymer filters from string to boolean
 final <- final %>%
@@ -199,9 +228,12 @@ final <- final %>% dplyr::left_join(., final %>%
 
 # We have to save ASXL1 G646W because this is a very recurrent variant that may be removed from our recurrent filter
 final <- final %>% dplyr::filter(nsamples_min_vaf <= count_threshold | (key == 'chr20 32434638 A>AG' & average_AF >= 0.05) | (key == 'chr20 32434638 A>AGG' & average_AF >= 0.05))        # Recurrent Filter
+cat (paste("save ASXL1 G646W", nrow(final)) )
 
+### NOT USED
 # Last filter to remove any variants that have a high recurrent count but are not reported inside Kelly's or Bick's dataset
-final <- final %>% dplyr::filter(!(nsamples_min_vaf >= bb_count_threshold & (sourcetotalsc_XGB <= 25 & CosmicCount <= 50)))
+#final <- final %>% dplyr::filter(!(nsamples_min_vaf >= bb_count_threshold & (sourcetotalsc_XGB <= 25 & CosmicCount <= 50)))
+# cat (paste("high recurrent count but are not reported inside Kelly's or Bick's dataset", nrow(final)) )
 
 # Nonsense Mutations (Stop Gained)
 TSG_gene_list <- read.table(TSG_list, header = TRUE, sep = "\t")
@@ -220,11 +252,14 @@ final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.35 & (sourcetot
 final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.35 & Gene %in% c("DNMT3A", "TET2", "ASXL1", "PPM1D") & VariantClass %in% nonsense_mutation, 0, comp_germline))
 final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.25 & average_AF < 0.35 & sourcetotalsc_XGB < 5 & CosmicCount < 25 & max_sub_gnomAD_AF > 0.0001, 1, comp_germline))
 final <- final %>% mutate(comp_germline = ifelse(median_VAF >= 0.35 & average_AF >= 0.25, 1, comp_germline))
+cat (paste("Germline Filters", nrow(final)) )
+
 
 # Adding INDEL lengths
 final <- final %>% mutate(alt_len = nchar(ALT), ref_len = nchar(REF))
 # Filter out weird INDELs
 final <- final %>% dplyr::filter(ifelse(CALL_BY_1 == TRUE & (nchar(REF) >= 20 | nchar(ALT) >= 20) & PINDEL_MATCH == "", FALSE, TRUE))
+cat (paste("Filter out weird INDELs", nrow(final)) )
 
 # Adding Near Columns
 vars <- read.table(bolton_bick_vars, sep = "\t", header = T, comment.char = "")
