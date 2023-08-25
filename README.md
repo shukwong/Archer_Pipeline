@@ -1,4 +1,4 @@
-# BoltonLab CH Calling Pipeline
+# BoltonLab (Ar)tifact Filtering (C)lonal (H)ematapoiesis Variant Calling Pipeline
 
 This pipeline is designed to process mutant/wildtype H.sapiens sequencing data from Illumina based sequencing for low VAF CH variants. It features four variant callers (Mutect2, VarDictJava, Lofreq2, and Pindel) for variant detection and performs various false positive filters and detection methods (fp_filter, PoN Fisher’s Exact Test, XGB model, etc.). This pipeline also generates VEP style annotations for all called variants as well as additional putative driver annotations generated from various database sources (TOPMed, MSK-IMPACT, COSMIC, OncoKB, etc.) <br />
 
@@ -31,6 +31,7 @@ This Pipeline has been tested and configured to run using Cromwell-70 as well as
 |library|String|LB Tag for BAM Metadata|
 |read_structure|Array[String]|https://github.com/fulcrumgenomics/fgbio/wiki/Read-Structures|
 |min_reads|Array[Int]|Minimum number of reads that constitutes a "read family"|
+|where_is_umi|String|Three options: "N = Name", "R = Read", or "T = Tag"|
 |umi_paired|Boolean|Set TRUE if using UMI pairs, FALSE for single read UMIs|
 |umi_length|Integer|ArcherDX specifies that all UMIs are a specific length, anything shorter or longer is thrown out|
 |min_base_quality|Integer|During consensus building, any base with a QUAL less than this value is masked with an N|
@@ -65,6 +66,8 @@ This Pipeline has been tested and configured to run using Cromwell-70 as well as
 |bqsr_known_sites|Array[File]|A series of VCF denoted sites in which have known variation to avoid confusing real variation with errors|
 |bqsr_known_sites_tbi|Array[File]|The index for the VCFs within bqsr_known_sites|
 |bqsr_intervals|Array[String]|A list of chromosomes which to apply the base quality score recalibration|
+|chrom_sizes|File|A file containing the chromosome and the total size (bp) of the chromosome|
+|af_only_snp_only_vcf|File|A VCF file that contains specific SNPs sites of interest, used for Somalier. Can be from https://github.com/brentp/somalier/releases/tag/v0.2.15|
 
 ### Variant Callers
 |Variable|Type|Definition|

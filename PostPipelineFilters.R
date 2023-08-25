@@ -8,21 +8,35 @@ library(sqldf)
 
 bolton_bick_vars <- "/Users/irenaeuschan/Documents/Irenaeus/data/bick.bolton.vars3.txt"
 cosmic_hotspots <- "/Users/irenaeuschan/Documents/Irenaeus/data/COSMIC.heme.myeloid.hotspot.tsv"
-TSG_list <- "/Users/irenaeuschan/Documents/Irenaeus/data/TSG_only_list.tsv"
+gene_list <- "/Users/irenaeuschan/Documents/Irenaeus/UKBB/oncoKB_CGC_pd_table_disparity_KB.csv"
+pd_table <- "/Volumes/bolton/Active/Protected/Annotation_Files/pd_table_kbreview_bick_trunc4_oncoKB_SAFE.filtered_genes_oncoKB_CGC.tsv"
+
 #Pilot <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/pilot.archer.combined.FPpass.tsv"
 #Pilot <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/pilot.mgi.combined.FPpass.tsv"
+Pilot <- "/Volumes/bolton/Active/Projects/ArcherPilot/Pilot/TERRA/pilot.combined.tsv"
 #Trios <- "/Users/irenaeuschan/Documents/Irenaeus/MGI_Yizhe/trios.combined.tsv"
+#MGI_EXTRA <- "/Volumes/bolton/Active/Projects/MGI_Data/TERRA_EXTRA/MGI_EXTRA.combined.tsv"
 #Dilution <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/dilution.combined.tsv"
-#Final <- "/Volumes/bolton/Active/projects/ProstateCancer/TERRA/prostate.final.FPpass.tsv"
+#Final <- "/Volumes/bolton/Active/Projects/ProstateCancer/TERRA/prostate.final.FPpass.tsv"
 #Prostate <- "/Users/irenaeuschan/Documents/Irenaeus/ProstateCancer/prostate.final.combined.FPpass.filtered_KB2.csv"
-Final <- "/Volumes/bolton/Active/projects/GoodCell/TERRA/GoodCell.combined.FPpass.tsv"
-Final <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/final.combined.FPpass.tsv"
-Orig <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/data/variant_review_IC_31722_KB_complete_updated.csv"
+Final <- "/Volumes/bolton/Active/Projects/GoodCell/TERRA/GoodCell2.combined.FPpass.tsv"
+#Final <- "/Users/irenaeuschan/Documents/Irenaeus/Freidman/final.combined.Freidman.FPpass.tsv"
+#Final <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/final.combined.FPpass.tsv"
+#Orig <- "/Users/irenaeuschan/Documents/Irenaeus/ArcherDX/data/variant_review_IC_31722_KB_complete_updated.csv"
 #Alex_Filter <- "/Users/irenaeuschan/Documents/Irenaeus/archer_pilot_data/alex_filter.csv"
 # alex_filter <- read.csv(Alex_Filter, header = TRUE)
-final <- read.table(Final, sep='\t', header = TRUE)
+#Final <- "/Volumes/bolton/Active/Projects/ElementBio/TERRAFinal/final.combined.tsv"
+
+unfiltered <- read.table(Final, sep='\t', header = TRUE, comment.char = '', quote = '')
+final <- unfiltered
+
+#final <- left_join(final, harvard_duplicates, by=c("SN_TAG"="fakeid")) %>% 
+#  mutate(id_export = ifelse(is.na(id_export), SN_TAG, id_export)) %>%
+#  mutate(SN_TAG = id_export) %>% select(-id_export)
 
 # Remove all variants that fail our general filter "all_fp_pass_XGB"
+# These filters are: PoN_pvalue, PoN_Zscore, lowAF, long_indels, bcbio, di_tri_nuc
+# This does NOT include fp_filter, that needs to be handled separately
 final <- final %>% dplyr::filter(as.logical(all_fp_pass_XGB))
 
 # Remove any weird Lofreq N calls
@@ -32,8 +46,21 @@ final <- final %>% dplyr::filter(ifelse(grepl('N', REF), FALSE, TRUE))
 # Remove Off-Target & Introns          
 final <- final %>% dplyr::filter(Consequence_VEP != "")
 
-# Remove Duplicated Rows
-final <- final[!(duplicated(final) | duplicated(final, fromLast = TRUE)), ]
+# Remove Variants that Failed PoN
+# Bonferroni Corrected p-value for Fisher's Exact Test (0.05 / Size of BED Panel)
+pon_pvalue = 2.114164905e-6
+pon_pvalue = 0.000000511148141
+pon_pvalue = 8.85582713e-7
+final <- final %>% mutate(pon_pvalue_Mutect_Raw = ifelse(is.na(pon_pvalue_Mutect_Raw), 0, pon_pvalue_Mutect_Raw),
+                 pon_pvalue_Lofreq_Raw = ifelse(is.na(pon_pvalue_Lofreq_Raw), 0, pon_pvalue_Lofreq_Raw),
+                 pon_pvalue_Vardict_Raw = ifelse(is.na(pon_pvalue_Vardict_Raw), 0, pon_pvalue_Vardict_Raw))
+final <- final %>% mutate(pon_FP_pass_XGB = ifelse(
+  pon_pvalue_Mutect_Raw <= pon_pvalue & pon_pvalue_Lofreq_Raw <= pon_pvalue & pon_pvalue_Vardict_Raw <= pon_pvalue, TRUE, FALSE
+))
+final <- final %>% filter(pon_FP_pass_XGB == TRUE)
+
+# Remove Duplicated Rows - If large, this will take a while
+# final <- final[!(duplicated(final) | duplicated(final, fromLast = TRUE)), ]
 
 # For the Dilution Data Only
 #final <- final %>% mutate(Sample = ifelse(grepl("T", SN_TAG, fixed = TRUE), paste0(unlist(lapply(strsplit(SN_TAG, "T", fixed = TRUE), "[[", 1)), "T"), SN_TAG))
@@ -41,12 +68,7 @@ final <- final[!(duplicated(final) | duplicated(final, fromLast = TRUE)), ]
 #dilution_final <- left_join(alex_filter %>% dplyr::select(sample_key, Germline), final, by=c("sample_key"="sample_key"))
 #final <- final %>% mutate(SN_TAG = unlist(lapply(strsplit(SN_TAG, "_", fixed = TRUE), "[[", 1)),)
 
-# Filter PoN P-Value
-GoodCell_pvalue = 0.05/97819
-Archer_pvalue = 0.05/23650
-#final <- final %>% filter(pon_pvalue_Lofreq_Raw <= GoodCell_pvalue | is.na(pon_pvalue_Lofreq_Raw), pon_pvalue_Mutect_Raw <= GoodCell_pvalue | is.na(pon_pvalue_Mutect_Raw), pon_pvalue_Vardict_Raw <= GoodCell_pvalue | is.na(pon_pvalue_Vardict_Raw))
-
-# Dealing with FP_filter
+# Dealing with fp_filter
 # First filter out which samples failed out other FP filters:
 # - PoN 
 # - Long INDELs (100 bp)
@@ -73,21 +95,11 @@ final$average_AD <- final %>% dplyr::select(gt_AD_alt_Mutect, gt_AD_alt_Lofreq, 
 # Filter out variants lower than 0.001 VAF because hard to tell the difference between artifact and real
 final <- final %>% filter(average_AF >= 0.001)
 
-# Calculate the Median VAF per Variant
-final <- final %>% left_join(., final %>% group_by(key) %>% summarise(median_VAF = median(average_AF)))
-
 # Filter out samples that failed MCV4 if it had an Alt Depth above 5
 final <- final %>% filter(ifelse(FP_Filter_MVC4_XGB == 1 & average_AD > 5, FALSE, TRUE))
 
 # Filter out samples that failed SB1 only if it had an Alt Depth above 10
 final <- final %>% filter(ifelse(FP_Filter_SB1_XGB == 1 & average_AD > 10, FALSE, TRUE))
-
-# Recurrent Filter Parameters
-# 80 Samples have R882H Mutation in ArcherDX Dataset
-count_threshold<-ceiling(length(unique((final$SN_TAG)))*0.06)
-bb_count_threshold<-ceiling(length(unique((final$SN_TAG)))*0.03)
-n_samples_min_vaf <- 0.001
-n_samples_min_count <- 5
 
 # Only one Caller
 final <- final %>%
@@ -116,18 +128,25 @@ final <- final %>% filter(!(CALL_BY_CALLER == "mutect" & average_AF < 0.01))
 # Throw out Silent Mutations
 final <- final %>% filter(Consequence_VEP != "synonymous_variant")
 
+# If Median VAF >= 35% and NEVER REPORTED in B/B or COSMIC
+# Calculate the Median VAF per Variant
+final <- final %>% left_join(., final %>% group_by(key) %>% summarise(median_VAF = median(average_AF)))
+final <- final %>% filter(!(median_VAF >= 0.35 & sourcetotalsc_XGB == 0 & CosmicCount == 0))
+
+min_alt <- 5
+
 # Strand Bias Filter - 90/10
 final <- final %>% rowwise() %>% mutate(pass_strand_bias = ifelse(sum(pass_strand_bias_Mutect, pass_strand_bias_Lofreq, pass_strand_bias_Vardict, na.rm = TRUE) >= 1, TRUE, FALSE))
 # Strand Bias Filter - Minimum Counts
-final <- final %>% mutate(enough_strand_evidence_Mutect = ifelse(gt_AD_alt_Mutect >= 5 & (AltFwd_Mutect_Raw == 0 | AltRev_Mutect_Raw == 0), 0, 1),
-                 enough_strand_evidence_Lofreq = ifelse(gt_AD_alt_Lofreq >= 5 & (AltFwd_Lofreq_Raw == 0 | AltRev_Lofreq_Raw == 0), 0, 1),
-                 enough_strand_evidence_Vardict = ifelse(gt_AD_alt_Vardict >= 5 & (AltFwd_Vardict_Raw == 0 | AltRev_Vardict_Raw == 0), 0, 1))
+final <- final %>% mutate(enough_strand_evidence_Mutect = ifelse(gt_AD_alt_Mutect >= min_alt & (AltFwd_Mutect_Raw == 0 | AltRev_Mutect_Raw == 0), 0, 1),
+                          enough_strand_evidence_Lofreq = ifelse(gt_AD_alt_Lofreq >= min_alt & (AltFwd_Lofreq_Raw == 0 | AltRev_Lofreq_Raw == 0), 0, 1),
+                          enough_strand_evidence_Vardict = ifelse(gt_AD_alt_Vardict >= min_alt & (AltFwd_Vardict_Raw == 0 | AltRev_Vardict_Raw == 0), 0, 1))
 final <- final %>% rowwise() %>% mutate(pass_strand_evidence = ifelse(sum(enough_strand_evidence_Mutect, enough_strand_evidence_Lofreq, enough_strand_evidence_Vardict, na.rm = TRUE) >= 1, TRUE, FALSE))
 final <- final %>% filter(pass_strand_evidence == TRUE)
 # Min Alt Count
-final <- final %>% mutate(min_alt_count_Mutect = ifelse((AltFwd_Mutect_Raw+AltRev_Mutect_Raw) < 5, 0, 1))
-final <- final %>% mutate(min_alt_count_Lofreq = ifelse((AltFwd_Lofreq_Raw+AltRev_Lofreq_Raw) < 5, 0, 1))
-final <- final %>% mutate(min_alt_count_Vardict = ifelse((AltFwd_Vardict_Raw+AltRev_Vardict_Raw) < 5, 0, 1))
+final <- final %>% mutate(min_alt_count_Mutect = ifelse((AltFwd_Mutect_Raw+AltRev_Mutect_Raw) < min_alt, 0, 1))
+final <- final %>% mutate(min_alt_count_Lofreq = ifelse((AltFwd_Lofreq_Raw+AltRev_Lofreq_Raw) < min_alt, 0, 1))
+final <- final %>% mutate(min_alt_count_Vardict = ifelse((AltFwd_Vardict_Raw+AltRev_Vardict_Raw) < min_alt, 0, 1))
 final <- final %>% rowwise() %>% mutate(pass_min_alt_count = ifelse(sum(min_alt_count_Mutect, min_alt_count_Lofreq, min_alt_count_Vardict, na.rm = TRUE) >= 1, TRUE, FALSE))
 final <- final %>% filter(pass_min_alt_count == TRUE) %>% dplyr::select(-min_alt_count_Mutect, -min_alt_count_Lofreq, -min_alt_count_Vardict)
 
@@ -168,45 +187,57 @@ final <- final %>%
 #rescue <- rescue %>% filter(sourcetotalsloci_XGB >= 5 | CosmicCount >= 25 | heme_cosmic_count >= 10 | myeloid_cosmic_count >= 5)
 #final <- rbind(final, rescue)
 
+# Recurrent Filter Parameters
+# 80 Samples have R882H Mutation in ArcherDX Dataset
+count_threshold<- max(ceiling(length(unique((final$SN_TAG)))*0.06), 5)
+bb_count_threshold<- max(ceiling(length(unique((final$SN_TAG)))*0.03), 2)
+n_samples_min_vaf <- 0.001
+n_samples_min_count <- 5
+
 # N_samples
 final <- final %>% dplyr::left_join(., final %>%
-                              dplyr::distinct(key, SN_TAG) %>%
-                              group_by(key) %>%
-                              mutate(nsamples = dplyr::n()) %>%
-                              dplyr::ungroup() %>%
-                              dplyr::select(key, nsamples) %>%
-                              dplyr::distinct(), by=c("key"="key"))
+                                      dplyr::distinct(key, SN_TAG) %>%
+                                      group_by(key) %>%
+                                      mutate(nsamples = dplyr::n()) %>%
+                                      dplyr::ungroup() %>%
+                                      dplyr::select(key, nsamples) %>%
+                                      dplyr::distinct(), by=c("key"="key"))
 
 final <- final %>% dplyr::left_join(., final %>% 
-                              dplyr::filter(average_AF >= n_samples_min_vaf) %>%
-                              dplyr::distinct(key, SN_TAG) %>%
-                              dplyr::group_by(key) %>%
-                              dplyr::mutate(nsamples_min_vaf = dplyr::n()) %>%
-                              dplyr::ungroup() %>%
-                              dplyr::select(key, nsamples_min_vaf) %>%
-                              dplyr::distinct(), by=c("key"="key")) %>%
+                                      dplyr::filter(average_AF >= n_samples_min_vaf) %>%
+                                      dplyr::distinct(key, SN_TAG) %>%
+                                      dplyr::group_by(key) %>%
+                                      dplyr::mutate(nsamples_min_vaf = dplyr::n()) %>%
+                                      dplyr::ungroup() %>%
+                                      dplyr::select(key, nsamples_min_vaf) %>%
+                                      dplyr::distinct(), by=c("key"="key")) %>%
   mutate(nsamples_min_vaf = ifelse(is.na(nsamples_min_vaf), 0, nsamples_min_vaf))
 
 final <- final %>% dplyr::left_join(., final %>% 
-                              dplyr::filter(average_AD >= n_samples_min_count) %>%
-                              dplyr::distinct(key, SN_TAG) %>%
-                              dplyr::group_by(key) %>%
-                              dplyr::mutate(nsamples_min_count = dplyr::n()) %>%
-                              dplyr::ungroup() %>%
-                              dplyr::select(key, nsamples_min_count) %>%
-                              dplyr::distinct(), by=c("key"="key")) %>%
+                                      dplyr::filter(average_AD >= n_samples_min_count) %>%
+                                      dplyr::distinct(key, SN_TAG) %>%
+                                      dplyr::group_by(key) %>%
+                                      dplyr::mutate(nsamples_min_count = dplyr::n()) %>%
+                                      dplyr::ungroup() %>%
+                                      dplyr::select(key, nsamples_min_count) %>%
+                                      dplyr::distinct(), by=c("key"="key")) %>%
   mutate(nsamples_min_count = ifelse(is.na(nsamples_min_count), 0, nsamples_min_count))
 
 # We have to save ASXL1 G646W because this is a very recurrent variant that may be removed from our recurrent filter
-final <- final %>% dplyr::filter(nsamples_min_vaf <= count_threshold | (key == 'chr20 32434638 A>AG' & average_AF >= 0.05) | (key == 'chr20 32434638 A>AGG' & average_AF >= 0.05))        # Recurrent Filter
+final <- final %>% dplyr::filter(nsamples_min_vaf < count_threshold | (key == 'chr20 32434638 A>AG' & average_AF >= 0.05) | (key == 'chr20 32434638 A>AGG' & average_AF >= 0.05))        # Recurrent Filter
 
 # Last filter to remove any variants that have a high recurrent count but are not reported inside Kelly's or Bick's dataset
-final <- final %>% dplyr::filter(!(nsamples_min_vaf >= bb_count_threshold & (sourcetotalsc_XGB <= 25 & CosmicCount <= 50)))
+final <- final %>% dplyr::filter(!(nsamples_min_vaf > bb_count_threshold & (sourcetotalsc_XGB <= 25 & CosmicCount <= 50)))
 
-# Nonsense Mutations (Stop Gained)
-TSG_gene_list <- read.table(TSG_list, header = TRUE, sep = "\t")
-TSG_gene_list <- TSG_gene_list$Gene
-nonsense_mutation <- c("frameshift_variant", "start_lost", "inframe_deletion", "stop_gained")
+# Gene Stuff
+full_gene_list <- read.csv(gene_list, header = TRUE)
+TSG_gene_list <- unname(unlist(full_gene_list %>% filter(isTSG == 1) %>% dplyr::select(Gene)))
+gene_list <- full_gene_list$Gene
+pd_table <- read.table(pd_table, header = TRUE, sep = "\t")
+bick_email <- pd_table %>% filter(source == 'Bick_email')
+
+nonsense_mutation <- c("frameshift_variant", "stop_lost", "stop_gained", "transcript_ablation")
+missense_mutation <- c("missense_variant", "inframe_deletion", "inframe_insertion")
 SF3B1_positions <- c(622, 623, 624, 625, 626, 662, 663, 664, 665, 666, 700, 701, 702, 703, 704, 740, 741, 742)
 clinvar_sig_terms <- c("Likely_pathogenic", "Likely_pathogenic&_drug_response", "Pathogenic", "Pathogenic/Likely_pathogenic", "Pathogenic/Likely_pathogenic&_drug_response")
 
@@ -216,14 +247,14 @@ final <- final %>% dplyr::rename(pass_max_sub_gnomAD_AF = max_gnomAD_AF)
 final <- final %>% rowwise() %>% mutate(max_sub_gnomAD_AF = max(max_gnomAD_AF_VEP, max_gnomADe_AF_VEP, max_gnomADg_AF_VEP, na.rm = TRUE)) %>% ungroup()
 final$max_pop_gnomAD_AF <- final %>% dplyr::select(gnomAD_AF_VEP, gnomADe_AF_VEP, gnomADg_AF_VEP) %>% apply(., 1, function(x){max(x, na.rm = T)})
 final <- final %>% mutate(comp_germline = ifelse(max_pop_gnomAD_AF <= 0.0005 | (key == 'chr20 32434638 A>AG' & average_AF >= 0.05) | (key == 'chr20 32434638 A>AGG' & average_AF >= 0.05), 0, 1))
-final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.35 & (sourcetotalsc_XGB <= 25 | CosmicCount <= 50), 1, comp_germline))
+final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.35 & (sourcetotalsc_XGB == 0 & sourcetotalsp_XGB == 0 & CosmicCount == 0), 1, comp_germline))
 final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.35 & Gene %in% c("DNMT3A", "TET2", "ASXL1", "PPM1D") & VariantClass %in% nonsense_mutation, 0, comp_germline))
-final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.25 & average_AF < 0.35 & sourcetotalsc_XGB < 5 & CosmicCount < 25 & max_sub_gnomAD_AF > 0.0001, 1, comp_germline))
+#final <- final %>% mutate(comp_germline = ifelse(average_AF >= 0.25 & average_AF < 0.35 & sourcetotalsc_XGB < 5 & CosmicCount < 25 & max_sub_gnomAD_AF > 0.0001, 1, comp_germline))
 final <- final %>% mutate(comp_germline = ifelse(median_VAF >= 0.35 & average_AF >= 0.25, 1, comp_germline))
 
 # Adding INDEL lengths
 final <- final %>% mutate(alt_len = nchar(ALT), ref_len = nchar(REF))
-# Filter out weird INDELs
+# Filter out Complex INDELs
 final <- final %>% dplyr::filter(ifelse(CALL_BY_1 == TRUE & (nchar(REF) >= 20 | nchar(ALT) >= 20) & PINDEL_MATCH == "", FALSE, TRUE))
 
 # Adding Near Columns
@@ -309,29 +340,35 @@ final$near.heme.cosmic.HS <- apply(final[,c("CHROM","POS","SYMBOL_VEP","aa.pos",
   any.in.n <- vector.n %in% ct$CHROM.POS
   
   if (any(any.in.p)) {
-    return(
-      c(x[["gene_aachange"]],
-        paste(ct$Gene_HGVSp_VEP[ct$GENE.AA.POS %in% vector.p],
-              paste0(ct$GENOMIC_MUTATION_ID[ct$GENE.AA.POS %in% vector.p],
-                     "(",ct$cosmic_count_chr[ct$GENE.AA.POS %in% vector.p],",",
-                     ct$haematopoietic_and_lymphoid_tissue_count_chr[ct$GENE.AA.POS %in% vector.p],",",
-                     ct$myeloid_count_chr[ct$GENE.AA.POS %in% vector.p],")"),
-              sep="|"))
-    )
+    my_pre_return <- c(x[["gene_aachange"]],
+                       paste(ct$Gene_HGVSp_VEP[ct$GENE.AA.POS %in% vector.p],
+                             paste0(ct$GENOMIC_MUTATION_ID[ct$GENE.AA.POS %in% vector.p],
+                                    "(",ct$cosmic_count_chr[ct$GENE.AA.POS %in% vector.p],",",
+                                    ct$haematopoietic_and_lymphoid_tissue_count_chr[ct$GENE.AA.POS %in% vector.p],",",
+                                    ct$myeloid_count_chr[ct$GENE.AA.POS %in% vector.p],")"), 
+                             sep="|"))
+    if(grepl("Ter", x["gene_aachange"])) {
+      return(my_pre_return[grepl("Ter", my_pre_return) | grepl("del|ins|dup", my_pre_return)])
+    } else {
+      return(my_pre_return[!grepl("Ter", my_pre_return)])
+    }
   } else if (any(any.in.n)) {
-    return(
-      c(x[["gene_cDNAchange"]],
-        paste(ct$Gene_HGVSc_VEP[ct$CHROM.POS %in% vector.n],
-              paste0(ct$GENOMIC_MUTATION_ID[ct$CHROM.POS %in% vector.n],
-                     "(",ct$cosmic_count_chr[ct$CHROM.POS %in% vector.n],",",
-                     ct$haematopoietic_and_lymphoid_tissue_count_chr[ct$CHROM.POS %in% vector.n],",",
-                     ct$myeloid_count_chr[ct$CHROM.POS %in% vector.n],")"),
-              sep="|"))
-    )
+    my_pre_return <- c(x[["gene_cDNAchange"]],
+                       paste(ct$Gene_HGVSc_VEP[ct$CHROM.POS %in% vector.n],
+                             paste0(ct$GENOMIC_MUTATION_ID[ct$CHROM.POS %in% vector.n],
+                                    "(",ct$cosmic_count_chr[ct$CHROM.POS %in% vector.n],",",
+                                    ct$haematopoietic_and_lymphoid_tissue_count_chr[ct$CHROM.POS %in% vector.n],",",
+                                    ct$myeloid_count_chr[ct$CHROM.POS %in% vector.n],")"), 
+                             sep="|"))
+    if(grepl("del|ins|dup", x["gene_cDNAchange"])) {
+      return(my_pre_return[grepl("del|ins|dup", my_pre_return)])
+    } else {
+      return(my_pre_return[!grepl("del|ins|dup", my_pre_return)])
+    }
   } else {
     return("")
   }
-})
+}) 
 
 # toJSON
 final$near.heme.cosmic.HS <- sapply(final$near.heme.cosmic.HS, function(x) {
@@ -429,7 +466,7 @@ final$near.heme.cosmic.loci.HS <- apply(final[,c("CHROM","POS","SYMBOL_VEP","aa.
   } else if (any(any.in.n)) {
     res <- unique(ct[ct$CHROM.POS %in% vector.n, c("CHROM.POS", "cDNAchange", "gene_loci_vep", "cosmic_count.totals.c", "heme_count.totals.c", "myeloid_count.totals.c")])
     if(grepl("del|ins|dup", x["cDNAchange"])) {
-      res <- res %>% filter(ifelse(grepl("del|ins|dup",DNAchange), TRUE, FALSE))
+      res <- res %>% filter(ifelse(grepl("del|ins|dup",cDNAchange), TRUE, FALSE))
       res <- res %>% group_by(cosmic_count.totals.c, heme_count.totals.c, myeloid_count.totals.c, gene_loci_vep) %>% 
         summarise(cosmic_count.totals.c = sum(cosmic_count.totals.c),
                   heme_count.totals.c = sum(heme_count.totals.c),
@@ -440,7 +477,7 @@ final$near.heme.cosmic.loci.HS <- apply(final[,c("CHROM","POS","SYMBOL_VEP","aa.
         return("")
       }
     } else {
-      res <- res %>% filter(ifelse(grepl("del|ins|dup",DNAchange), FALSE, TRUE))
+      res <- res %>% filter(ifelse(grepl("del|ins|dup",cDNAchange), FALSE, TRUE))
       res <- res %>% group_by(cosmic_count.totals.c, heme_count.totals.c, myeloid_count.totals.c, gene_loci_vep) %>% 
         summarise(cosmic_count.totals.c = sum(cosmic_count.totals.c),
                   heme_count.totals.c = sum(heme_count.totals.c),
@@ -515,95 +552,128 @@ final$near.BB.loci.HS.logic <- unlist(lapply(final$near.BB.loci.HS, function(x) 
   }
 }))
 
-if (!("n.loci.truncating.vep" %in% colnames(final))){
-  final$truncating <- ifelse(grepl("Ter",final$AAchange.x), "truncating", "not")
+if (!("n.loci.truncating.vep" %in% colnames(final))) {
+  final$truncating <- ifelse(grepl("Ter", final$AAchange), "truncating", "not")
   dims <- dim(final)[[1]]
-  final <- sqldf("SELECT l.*, r.`n.loci.truncating.vep`, r.`source.totals.loci.truncating`, r.`truncating`
-             FROM `final` as l
+  tmp <- final[final$key %in% vars$key | final$gene_loci_vep %in% vars$gene_loci_vep, ]
+  tmp <- sqldf("SELECT l.*, r.`n.loci.truncating.vep`, r.`source.totals.loci.truncating`
+             FROM `tmp` as l
              LEFT JOIN `vars` as r
              on (l.key = r.key AND l.truncating = r.truncating) OR (l.gene_loci_vep = r.gene_loci_vep AND l.truncating = r.truncating)")
-  final <- final[!duplicated(final),]
-  paste0("dims match after sqldf: ",dim(final)[[1]] == dims)
+  tmp <- tmp %>% select(key, gene_loci_vep, truncating, n.loci.truncating.vep)
+  tmp <- tmp[!duplicated(tmp), ]
+  final <- final %>% left_join(tmp %>% select(key, gene_loci_vep, truncating, n.loci.truncating.vep),
+                             by = c("key", "gene_loci_vep", "truncating")
+  )
+  paste0("dims match after sqldf: ", dim(final)[[1]] == dims)
   final <- final %>% dplyr::select(-truncating)
 }
 
 # Adding Recurrent Proportions
+min_samples_for_recurrent <- max(ceiling(length(unique((final$SN_TAG)))*0.001),2)  # It's 5 in UKBB
 total_samples = length(unique(final$SN_TAG)) # 1934 (for Archer)
 total_heme_cosmic = 29234
 total_BB = 122691
 final <- final %>% mutate(prop_nsamples = nsamples_min_vaf/total_samples, 
-                          prop_Cosmic = (1+heme_cosmic_count)/total_heme_cosmic, 
-                          prop_BB = (1+sourcetotalsc_XGB)/total_BB) %>%
+                          prop_Cosmic = (0.5+heme_cosmic_count)/total_heme_cosmic, 
+                          prop_BB = (0.5+sourcetotalsc_XGB)/total_BB) %>%
   mutate(ratio_to_BB = prop_nsamples/prop_BB, ratio_to_cosmic = prop_nsamples/prop_Cosmic)
 
 # These are considered to be recurrent
 final <- final %>% mutate(pass_prop_recurrent = case_when(
-  nsamples_min_vaf > ceiling(length(unique((final$SN_TAG)))*0.001) & sourcetotalsc_XGB == 0 & heme_cosmic_count == 0 & (ratio_to_BB > 1335 | ratio_to_cosmic > 835) ~ FALSE,
-  nsamples_min_vaf > ceiling(length(unique((final$SN_TAG)))*0.001) & sourcetotalsc_XGB == 0 & heme_cosmic_count != 0 & ratio_to_cosmic > 835 ~ FALSE,
-  nsamples_min_vaf > ceiling(length(unique((final$SN_TAG)))*0.001) & sourcetotalsc_XGB != 0 & heme_cosmic_count == 0 & ratio_to_BB > 1335 ~ FALSE,
-  nsamples_min_vaf > ceiling(length(unique((final$SN_TAG)))*0.001) & sourcetotalsc_XGB != 0 & heme_cosmic_count != 0 & (ratio_to_BB > 1335 & ratio_to_cosmic > 835) ~ FALSE,
+  Gene %in% unique(bick_email$Gene) ~ TRUE,
+  nsamples_min_vaf > min_samples_for_recurrent & sourcetotalsc_XGB == 0 & heme_cosmic_count != 0 & ratio_to_cosmic > 835 ~ FALSE,
+  nsamples_min_vaf > min_samples_for_recurrent & sourcetotalsc_XGB != 0 & heme_cosmic_count == 0 & ratio_to_BB > 1335 ~ FALSE,
+  nsamples_min_vaf > min_samples_for_recurrent & sourcetotalsc_XGB != 0 & heme_cosmic_count != 0 & (ratio_to_BB > 1335 & ratio_to_cosmic > 835) ~ FALSE,
   TRUE ~ TRUE
 )) %>% filter(pass_prop_recurrent == TRUE | (key == 'chr20 32434638 A>AG' & average_AF >= 0.05) | (key == 'chr20 32434638 A>AGG' & average_AF >= 0.05))
+
+# Autofail Variants with NO support in B/B and Cosmic that have nsamples >20
+final <- final %>% filter(ifelse(
+  sourcetotalsc_XGB == 0 & heme_cosmic_count == 0 & nsamples_min_vaf > 20 & !(Gene %in% unique(bick_email$Gene)), FALSE, TRUE
+)) 
 
 # Putative Driver Rules 
 # ---------------------
 # 1) TSG + Nonsense Mutation --> PD = 1
-# 2) TSG + OncoKB Support --> PD = 1
+# 2) OncoKB is Reviewed by Pathologists --> PD = 1
 # 3) If OncoKB Reports as 'Neutral' but A LOT of Support from B/B then B/B takes precedence
-# 4) TSG + OncoKB No Support --> PD = 0
-# 5) TSG + Missense Variant + Cosmic Support  --> PD = 1
-# 6) TSG + Missense Variant + B/B Loci Count + SIFT & PolyPhen Support --> PD = 1
-# 7) TSG + Missense Variant + Near B/B Hotspot | Near Cosmic Hotspot + SIFT & PolyPhen Support --> PD = 1
-# 8) SRSF2 Rules
+# 4) OncoKB No Support --> PD = 0
+# 5) Missense Variant + Cosmic Support  --> PD = 1
+# 6) Missense Variant + B/B Loci Count + SIFT & PolyPhen Support --> PD = 1
+# 7) Missense Variant + Near B/B Hotspot | Near Cosmic Hotspot + SIFT & PolyPhen Support --> PD = 1
+# 8a) SRSF2 + Hotspot
+# 8b) SRSF2 + OncoKB
 # 9) SF3B1 Rules
-# 10) JAK2 Rules
-# 11) PPM1D Exon 6 Rules
-# 12) TSG + Missense Variant + B/B AA Support w/ EITHER SIFT | PolyPhen Support --> PD = 1
-# 13) TSG + Missense Variant + Extension of Termination Codon --> PD = 1
-# 14) TSG + Splice Acceptor/Donor Variant --> PD = 1
-final <- final %>% mutate(putative_driver = case_when(
-  Gene %in% TSG_gene_list & VariantClass %in% nonsense_mutation  ~ 1,
-  grepl("Oncogenic", oncoKB) ~ 1,
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & n.HGVSp.y >= 10 ~ 1,
-  Gene %in% TSG_gene_list & grepl("Neutral", oncoKB) ~ 0,
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & CosmicCount >= 10 & (heme_cosmic_count >= 1 | myeloid_cosmic_count >= 1) ~ 1,
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (n.loci.vep - n.loci.truncating.vep) >= 5 & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) ~ 1,
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) ~ 1,
-  Gene == "SRSF2" & VariantClass == "missense_variant" & aa.pos == 95 ~ 1,
-  Gene == "SF3B1" & VariantClass == "missense_variant" & aa.pos %in% SF3B1_positions ~ 1,
-  Gene == "JAK2" & grepl("Oncogenic", oncoKB) ~ 1,
-  Gene == "PPM1D" & VariantClass %in% nonsense_mutation & EXON_VEP == "6/6" ~ 1,
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & n.HGVSp.y >= 1 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) ~ 1,
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & grepl('extTer', gene_aachange) ~ 1,
-  Gene %in% TSG_gene_list & (VariantClass == "splice_donor_variant" | VariantClass == "splice_aceptor_variant") ~ 1, 
-  Gene %in% TSG_gene_list & clinvar_CLINSIGN_VEP %in% clinvar_sig_terms ~ 1,
-  Gene %in% TSG_gene_list & Consequence_VEP == "splice_region_variant&synonymous_variant" ~ 0,
-  TRUE ~ 0
-), pd_reason = case_when(
-  Gene %in% TSG_gene_list & VariantClass %in% nonsense_mutation  ~ "Nonsense Mutation in TSG",
+# 10) IDH1 and IDH2 Hotspots
+# 11) JAK2 Rules
+# 12) PPM1D Exon 6 Rules
+# 13) Missense Variant + B/B AA Support w/ EITHER SIFT | PolyPhen Support --> PD = 1
+# 14) Missense Variant + Extension of Termination Codon --> PD = 1
+# 15) TSG + Splice Acceptor/Donor Variant --> PD = 1
+# 16) TSG + ClinVar Support --> PD == 1
+# 17) Synonymous Variant in Splicing Region (Handled with SpliceAI)
+final <- final %>% mutate(pd_reason = case_when(
+  Gene %in% TSG_gene_list & VariantClass %in% nonsense_mutation ~ "Nonsense Mutation in TSG",
   grepl("Oncogenic", oncoKB) ~ "OncoKB",
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & n.HGVSp.y >= 10 ~ "B/B Hotspot >= 10",
-  Gene %in% TSG_gene_list & grepl("Neutral", oncoKB) ~ "Not PD",
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & CosmicCount >= 10 & (heme_cosmic_count >= 1 | myeloid_cosmic_count >= 1) ~ "COSMIC",
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (n.loci.vep - n.loci.truncating.vep) >= 5 & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) ~ "Loci + SIFT/PolyPhen",
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) ~ "Near Hotspot + SIFT/PolyPhen",
-  Gene == "SRSF2" & VariantClass == "missense_variant" & aa.pos == 95 ~ "SRSF2 Hotspot",
-  Gene == "SF3B1" & VariantClass == "missense_variant" & aa.pos %in% SF3B1_positions ~ "SF3B1 Hotspot",
-  Gene == "JAK2" & grepl("Oncogenic", oncoKB) ~ "JAK2 OncoKB",
+  Gene %in% gene_list & VariantClass %in% missense_mutation & (sourcetotalsp_XGB >= 10 | sourcetotalsc_XGB >= 5) ~ "B/B Hotspot >= 10",
+  Gene %in% gene_list & grepl("Neutral", oncoKB) ~ "Not PD",
+  Gene %in% gene_list & VariantClass %in% missense_mutation & (CosmicCount >= 10 | heme_cosmic_count >= 5 | myeloid_cosmic_count >= 1) ~ "COSMIC",
+  Gene %in% gene_list & VariantClass %in% missense_mutation & (n.loci.vep - n.loci.truncating.vep) >= 5 & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) ~ "Loci + SIFT/PolyPhen",
+  Gene %in% gene_list & VariantClass %in% missense_mutation & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) ~ "Near Hotspot + SIFT/PolyPhen",
+  Gene == "SRSF2" & VariantClass %in% missense_mutation & aa.pos == 95 ~ "SRSF2 Hotspot",
+  # Gene == "SRSF2" & grepl("Oncogenic", oncoKB) ~ "SRSF2 OncoKB", # redundant
+  Gene == "SF3B1" & VariantClass %in% missense_mutation & aa.pos %in% SF3B1_positions ~ "SF3B1 Hotspot",
+  Gene == "IDH1" & VariantClass %in% missense_mutation & aa.pos == 132 ~ "IDH1 Hotspot",
+  Gene == "IDH2" & VariantClass %in% missense_mutation & (aa.pos == 140 | aa.pos == 172) ~ "IDH2 Hotspot"
+  # Gene == "JAK2" & grepl("Oncogenic", oncoKB) ~ "JAK2 OncoKB", # redundant
   Gene == "PPM1D" & VariantClass %in% nonsense_mutation & EXON_VEP == "6/6" ~ "Nonsense Mutation on Exon 6",
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & n.HGVSp.y >= 1 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) ~ "B/B Hotspot + SIFT/PolyPhen",
-  Gene %in% TSG_gene_list & VariantClass == "missense_variant" & grepl('extTer', gene_aachange) ~ "Termination Extension",
-  Gene %in% TSG_gene_list & (VariantClass == "splice_donor_variant" | VariantClass == "splice_aceptor_variant") ~ "Splicing Mutation", 
+  Gene %in% gene_list & VariantClass %in% missense_mutation & sourcetotalsp_XGB >= 1 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) ~ "B/B Hotspot + SIFT/PolyPhen",
+  # Gene %in% gene_list & VariantClass %in% missense_mutation & grepl("extTer", gene_aachange) ~ "Termination Extension", # remove
+  Gene %in% TSG_gene_list & VariantClass %in% c("splice_donor_variant", "splice_aceptor_variant", "splice_region_variant") & Consequence_VEP != "splice_region_variant&synonymous_variant" ~ "Splicing Mutation",
   Gene %in% TSG_gene_list & clinvar_CLINSIGN_VEP %in% clinvar_sig_terms ~ "ClinVar",
-  Gene %in% TSG_gene_list & Consequence_VEP == "splice_region_variant&synonymous_variant" ~ "Not PD",
+  Gene %in% gene_list & Consequence_VEP == "splice_region_variant&synonymous_variant" ~ "Not PD",
   TRUE ~ "Not PD"
-))
+), putative_driver = ifelse(pd_reason != "Not PD", 1, 0))
 
+# OncoKB API automatically classifies ALL splicing mutations as oncogenic, however if the mutation is synonymous, then we have to change it
 final <- final %>% mutate(putative_driver = ifelse(grepl("Oncogenic", oncoKB) & Consequence_VEP == "splice_region_variant&synonymous_variant" & !(clinvar_CLINSIGN_VEP %in% clinvar_sig_terms), 0, putative_driver),
                           pd_reason = ifelse(grepl("Oncogenic", oncoKB) & Consequence_VEP == "splice_region_variant&synonymous_variant" & !(clinvar_CLINSIGN_VEP %in% clinvar_sig_terms), "Not PD", pd_reason))
 
+# Additional Bick's Email Rules
+unique(bick_email$Gene)
+ZBTB33 <- unname(unlist(bick_email %>% filter(Gene == "ZBTB33") %>% mutate(AAchange = paste0(aa_ref, aa_pos, aa_alt)) %>% dplyr::select(AAchange) %>% dplyr::filter(AAchange != "***")))
+final <- final %>% mutate(putative_driver = case_when(
+  Gene == "ZBTB33" & VariantClass %in% missense_mutation & AAchange.x %in% ZBTB33 ~ 1, 
+  Gene %in% unique(bick_email$Gene) & (VariantClass %in% nonsense_mutation) ~ 1,
+  TRUE ~ putative_driver
+), pd_reason = case_when(
+  Gene == "ZBTB33" & VariantClass %in% missense_mutation & AAchange.x %in% ZBTB33 ~ "Bick's Email", 
+  Gene %in% unique(bick_email$Gene) & (VariantClass %in% nonsense_mutation) ~ "Bick's Email",
+  TRUE ~ pd_reason
+))
+
 # Review Stuff
 final <- final %>% mutate(Review = "No Review")
+
+# Review Rule for SRSF2 for Matthew Walters
+# Need to split Protein_position_VEP up into beginning and end
+final <- final %>% mutate(Protein_position_VEP_start = ifelse(grepl("-", Protein_position_VEP), str_split(Protein_position_VEP,"-")[[1]][1], Protein_position_VEP),
+                          Protein_position_VEP_end = ifelse(grepl("-", Protein_position_VEP), str_split(Protein_position_VEP,"-")[[1]][2], Protein_position_VEP))
+
+# If it is an Inframe Insertion or Deletion that OVERLAPS P95, then mark for review
+final <- final %>% mutate(Review = case_when(
+  Review == "No Review" & Gene == "SRSF2" & (VariantClass == "inframe_deletion" | VariantClass == "inframe_insertion") & as.numeric(Protein_position_VEP_start) <= 95 & as.numeric(Protein_position_VEP_end) >= 95 ~ "MW Review",
+  Review != "No Review" & Gene == "SRSF2" & (VariantClass == "inframe_deletion" | VariantClass == "inframe_insertion") & as.numeric(Protein_position_VEP_start) <= 95 & as.numeric(Protein_position_VEP_end) >= 95 ~ paste(Review, "MW Review", sep = ";"),
+  TRUE ~ Review
+))
+
+# For SRSF2, SF3B1, IDH1, IDH2, and JAK2 (If not already identified as PD or review... remove all other variants)
+SSIIJ = c("SRSF2", "SF3B1", "IDH1", "IDH2", "JAK2")
+final <- final %>% filter(ifelse(
+  Gene %in% SSIIJ & putative_driver == 0 & Review == "No Review", FALSE, TRUE
+))
+
 final <- final %>% mutate(Review = ifelse(CALL_BY_CALLER == "mutect" & (average_AF >= 0.01 & average_AF < 0.02), "LowVAF Mutect", Review))
 final <- final %>% mutate(Review = case_when(
   Review == "No Review" & nchar(REF) > 5 | nchar(ALT) > 5 ~ "Long INDEL",
@@ -611,8 +681,8 @@ final <- final %>% mutate(Review = case_when(
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
-  Review == "No Review" & alt_len >= 2 & ref_len >= 2 ~ "Weird INDEL",
-  Review != "No Review" & alt_len >= 2 & ref_len >= 2 ~ paste(Review, "Weird INDEL", sep = ";"),
+  Review == "No Review" & alt_len >= 2 & ref_len >= 2 ~ "Complex INDEL",
+  Review != "No Review" & alt_len >= 2 & ref_len >= 2 ~ paste(Review, "Complex INDEL", sep = ";"),
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
@@ -626,28 +696,39 @@ final <- final %>% mutate(Review = case_when(
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
-  Review == "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & pass_homopolymer_filter == "false" ~ "Homopolymer Region",
-  Review != "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & pass_homopolymer_filter == "false" ~ paste(Review, "Homopolymer Region", sep = ";"),
+  Review == "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & pass_homopolymer_filter == "false" ~ "Homopolymer Region",
+  Review != "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & pass_homopolymer_filter == "false" ~ paste(Review, "Homopolymer Region", sep = ";"),
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
-  Review == "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) & putative_driver == 0 ~ "S/P Missense Review",
-  Review != "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) & putative_driver == 0 ~ paste(Review, "S/P Missense Review", sep = ";"),
+  Review == "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) & putative_driver == 0 & sourcetotalsc_XGB >= 1 ~ "B/B Missense Review",
+  Review != "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) & putative_driver == 0 & sourcetotalsc_XGB >= 1 ~ paste(Review, "B/B Missense Review", sep = ";"),
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
-  Review == "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ "NHS Missense Review",
-  Review != "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ paste(Review, "NHS Missense Review", sep = ";"),
+  Review == "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) & putative_driver == 0 ~ "S/P Missense Review",
+  Review != "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & grepl("deleterious", SIFT_VEP) & grepl("damaging", PolyPhen_VEP) & putative_driver == 0 ~ paste(Review, "S/P Missense Review", sep = ";"),
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
-  Review == "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (n.loci.vep - n.loci.truncating.vep) >= 5 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ "HS Missense Review",
-  Review != "No Review" & Gene %in% TSG_gene_list & VariantClass == "missense_variant" & (n.loci.vep - n.loci.truncating.vep) >= 5 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ paste(Review, "HS Missense Review", sep = ";"),
+  Review == "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ "NHS Missense Review",
+  Review != "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & (near.BB.loci.HS.logic == TRUE | near.heme.cosmic.loci.HS.logic == TRUE) & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ paste(Review, "NHS Missense Review", sep = ";"),
   TRUE ~ Review
 ))
 final <- final %>% mutate(Review = case_when(
-  Review == "No Review" & nsamples_min_vaf > ceiling(length(unique((final$SN_TAG)))*0.001) ~ "Recurrent",
-  Review != "No Review" & nsamples_min_vaf > ceiling(length(unique((final$SN_TAG)))*0.001) ~ paste(Review, "Recurrent", sep = ";"),
+  Review == "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & (n.loci.vep - n.loci.truncating.vep) >= 5 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ "HS Missense Review",
+  Review != "No Review" & Gene %in% gene_list & VariantClass %in% missense_mutation & (n.loci.vep - n.loci.truncating.vep) >= 5 & (grepl("deleterious", SIFT_VEP) | grepl("damaging", PolyPhen_VEP)) & putative_driver == 0 ~ paste(Review, "HS Missense Review", sep = ";"),
+  TRUE ~ Review
+))
+final <- final %>% mutate(Review = case_when(
+  Review == "No Review" & nsamples_min_vaf > min_samples_for_recurrent ~ "Recurrent",
+  Review != "No Review" & nsamples_min_vaf > min_samples_for_recurrent ~ paste(Review, "Recurrent", sep = ";"),
+  TRUE ~ Review
+))
+
+final <- final %>% mutate(Review = case_when(
+  Review == "No Review" & Gene %in% unique(bick_email %>% filter(Gene != 'ZBTB33') %>% dplyr::select(Gene)) ~ "Bick's Email",
+  Review != "No Review" & Gene %in% unique(bick_email %>% filter(Gene != 'ZBTB33') %>% dplyr::select(Gene)) ~ paste(Review, "Bick's Email", sep = ";"),
   TRUE ~ Review
 ))
 
@@ -658,9 +739,9 @@ final <- final %>% mutate(auto_pass_recurrence = case_when(
   Review == "Recurrent" & sourcetotalsc_XGB != 0 & heme_cosmic_count == 0 & ratio_to_BB <= 200 ~ TRUE,
   Review == "Recurrent" & sourcetotalsc_XGB != 0 & heme_cosmic_count != 0 & (ratio_to_BB <= 200 & ratio_to_cosmic <= 53) ~ TRUE,
   TRUE ~ FALSE
-)) %>% mutate(Review = ifelse(auto_pass_recurrence, "WasRecurrent", Review))
+)) %>% mutate(Review = ifelse(auto_pass_recurrence, "Was Recurrent", Review))
 
-# If Long INDEL or Weird INDEL have at least SOME PINDEL Support (>= 10) then it should be okay.
+# If Long INDEL or Complex INDEL have at least SOME PINDEL Support (>= 10) then it should be okay.
 final$MAX_PINDEL_MATCH <- unlist(lapply(final$PINDEL_MATCH, function(x) {
   if (x == "") {
     return(0)
@@ -695,11 +776,13 @@ final <- final %>% arrange(CHROM, POS, REF, ALT)
 review <- final %>% filter(case_when(
   grepl("LowVAF Mutect", Review) & putative_driver == 1 ~ TRUE,
   grepl("Long INDEL", Review) & putative_driver == 1 ~ TRUE,
-  grepl("Weird INDEL", Review) & putative_driver == 1 ~ TRUE,
+  grepl("Complex INDEL", Review) & putative_driver == 1 ~ TRUE,
   grepl("High VAF", Review) & putative_driver == 1 ~ TRUE,
   grepl("Missense Review", Review) & putative_driver == 0 ~ TRUE,
-  grepl("\\bRecurrent\\b", Review) & putative_driver == 1 ~ TRUE,
+  grepl("^Recurrent$", Review) & putative_driver == 1 ~ TRUE,
   grepl("Homopolymer Region", Review) & putative_driver == 1 ~ TRUE,
+  grepl("MW Review", Review) & putative_driver == 0 ~ TRUE,
+  grepl("Pindel Match", Review) & putative_driver == 1 ~ TRUE,
   grepl("Splice Region Variant", Review) & putative_driver == 0 ~ TRUE
 )) %>% filter(ifelse(comp_germline == 0, TRUE, FALSE))
 
@@ -709,6 +792,7 @@ passed <- final %>% filter(case_when(
   putative_driver == 1 & Review == "No Review" ~ TRUE,
   putative_driver == 1 & "Missense Review" %in% Review ~ TRUE,
   putative_driver == 1 & Review == "Was Recurrent" ~ TRUE,
+  putative_driver == 1 & grepl("MW Review", Review) ~ TRUE,
   putative_driver == 1 & grepl("Splice Region Variant", Review) ~ TRUE
 ))
 
@@ -716,7 +800,7 @@ table(passed %>% dplyr::select(Review, putative_driver))
 
 check<-c(review$sample_key, passed$sample_key)
 table(final %>% filter(ifelse(sample_key %in% check, FALSE, TRUE)) %>% dplyr::select(putative_driver, Review), useNA = "always")
-                            
-write.csv(final, "final.combined.FPpass.filtered.KB.csv", row.names = FALSE)
+
+write.csv(final, "final.combined.FPpass.filtered.csv", row.names = FALSE)
 write.csv(passed, "passed.combined.FPpass.filtered.csv", row.names = FALSE)
 write.csv(review, "review.combined.FPpass.filtered.csv", row.names = FALSE)

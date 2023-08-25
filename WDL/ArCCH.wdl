@@ -50,10 +50,11 @@ workflow boltonlab_CH {
         File fastq_one
         File fastq_two
         Boolean bam_input = false           # Default input is FASTQ files, but unaligned BAM is preferred
+        Boolean cram_input = false          # If the input is a CRAM then we have to convert it into a BAM
         File unaligned_bam = ""
-        Boolean? aligned = false            # If input is an already aligned BAM file then set this flag
+        Boolean aligned = false            # If input is an already aligned BAM file then set this flag
         File? aligned_bam_file
-        File? aligned_bam_file_bai
+        File? aligned_bai_file
         Array[String] read_structure        # Used for the UMI processing see: https://github.com/fulcrumgenomics/fgbio/wiki/Read-Structures
         String tumor_sample_name
         File target_intervals               # Interval List
@@ -73,6 +74,7 @@ workflow boltonlab_CH {
         # FASTQ Preprocessing
         Boolean has_umi = true
         Boolean? umi_paired = true          # If the UMI is paired (R1 and R2) then set this flag
+        String where_is_umi = "T"           # Three options "N = Name", "R = Read", or "T = Tag"
         Int umi_length = 8
         Array[Int] min_reads = [1]          # The minimum number of reads that constitutes a "read family"
         Float? max_read_error_rate = 0.05   # If 5% of the reads within a "read family" does not match, removes the family
@@ -81,6 +83,8 @@ workflow boltonlab_CH {
         Float max_no_call_fraction = 0.5    # Maximum fraction of no-calls (N) in the read after filtering
 
         # BQSR
+        # https://www.illumina.com/content/dam/illumina-marketing/documents/products/appnotes/novaseq-hiseq-q30-app-note-770-2017-010.pdf
+        Boolean apply_bqsr = false
         Array[File] bqsr_known_sites
         Array[File] bqsr_known_sites_tbi
         Array[String] bqsr_intervals
@@ -117,7 +121,7 @@ workflow boltonlab_CH {
         String? ref_date = "20161216"
         Int? pindel_min_supporting_reads = 3
 
-        # See: http://bcb.io/2016/04/04/vardict-filtering/
+        # See: https://github.com/bcbio/bcbio_validations/blob/master/somatic-lowfreq/README.md
         # Parameters MQ, NM, DP, and QUAL are calculated using a small subset then identifying the cut-off for 2% of the left side samples
         String bcbio_filter_string = "((FMT/AF * FMT/DP < 6) && ((INFO/MQ < 55.0 && INFO/NM > 1.0) || (INFO/MQ < 60.0 && INFO/NM > 3.0) || (FMT/DP < 6500) || (INFO/QUAL < 27)))"
 
@@ -164,7 +168,7 @@ workflow boltonlab_CH {
         File normalized_gnomad_exclude_tbi
 
         # Used for Pilot Data. Leave FALSE
-        Boolean? pilot = false
+        Boolean pilot = false
     }
 
     # If the BAM file is already aligned and consensus sequencing was done, then alignment can be skipped
@@ -179,16 +183,11 @@ workflow boltonlab_CH {
 
             # Archer UMIs are not typical, they have a 13 bp Adapter after their 8 bp UMI
             # There needs to be some pruning involved before we can extract the UMIs
-            call filterArcherUmiLength as filterUMI {
+            call filterArcherUMILengthAndbbmapRepair as repair {
                 input:
                 fastq1 = select_first([bamToFastq.fastq_one, fastq_one]),
                 fastq2 = select_first([bamToFastq.fastq_two, fastq_two]),
                 umi_length = umi_length
-            }
-            call bbmapRepair as repair {
-                input:
-                fastq1 = filterUMI.fastq1_filtered,
-                fastq2 = filterUMI.fastq2_filtered
             }
             call fastqToBam as archer_fastq_to_bam {
                 input:
@@ -216,31 +215,30 @@ workflow boltonlab_CH {
 
         if (has_umi) {
             # Removes UMIs from Reads and adds them as RX Tag
-            if (platform != 'MGI') {
+            if (where_is_umi == 'R') {
                 call extractUmis {
                     input:
                     bam = select_first([archer_fastq_to_bam.bam, fastq_to_bam.bam, unaligned_bam]),
                     read_structure = read_structure,
                     umi_paired = umi_paired
                 }
-                # Mark Adapters
-                call markIlluminaAdapters as markAdapters{
-                    input:
-                    bam = extractUmis.umi_extracted_bam
-                }
             }
-
-            if (platform == 'MGI') {
-                call markIlluminaAdapters as markAdapters_MGI{
+            if (where_is_umi == 'N') {
+                call copyUMIFromReadName {
                     input:
                     bam = select_first([fastq_to_bam.bam, unaligned_bam])
                 }
             }
 
+            call markIlluminaAdapters as markAdapters {
+                input:
+                bam = select_first([extractUmis.umi_extracted_bam, copyUMIFromReadName.umi_extracted_bam, fastq_to_bam.bam, unaligned_bam])
+            }
+
             # First Alignment
             call umiAlign as align {
                 input:
-                bam = select_first([markAdapters.marked_bam, markAdapters_MGI.marked_bam]),
+                bam = markAdapters.marked_bam,
                 reference = reference,
                 reference_fai = reference_fai,
                 reference_dict = reference_dict,
@@ -289,6 +287,7 @@ workflow boltonlab_CH {
                 reference = reference,
                 reference_fai = reference_fai,
                 reference_dict = reference_dict,
+                sample_name = tumor_sample_name,
                 min_reads = min_reads,
                 max_read_error_rate = max_read_error_rate,
                 max_base_error_rate = max_base_error_rate,
@@ -308,6 +307,7 @@ workflow boltonlab_CH {
                 reference = reference,
                 reference_fai = reference_fai,
                 reference_dict = reference_dict,
+                sample_name = tumor_sample_name,
                 target_intervals = target_intervals,
                 description = tumor_sample_name,
                 umi_paired = umi_paired
@@ -315,25 +315,40 @@ workflow boltonlab_CH {
         }
     }
 
-    # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
-    call bqsrApply as bqsr {
-        input:
-        reference = reference,
-        reference_fai = reference_fai,
-        reference_dict = reference_dict,
-        bam = select_first([filterClipAndCollectMetrics.clipped_bam, aligned_bam_file, clipAndCollectMetrics.clipped_bam]),
-        bam_bai = select_first([filterClipAndCollectMetrics.clipped_bam_bai, aligned_bam_file_bai, clipAndCollectMetrics.clipped_bam_bai]),
-        intervals = bqsr_intervals,
-        known_sites = bqsr_known_sites,
-        known_sites_tbi = bqsr_known_sites_tbi,
-        output_name = tumor_sample_name
+    if (cram_input) {
+        call cramToBAM {
+            input:
+            input_cram = select_first([filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+            sample_name = tumor_sample_name,
+            reference = reference,
+            reference_fai = reference_fai,
+            reference_dict = reference_dict
+        }
+    }
+
+    if (apply_bqsr) {
+        # Due to: https://gatk.broadinstitute.org/hc/en-us/community/posts/360075246531-Is-BQSR-accurate-on-Novaseq-6000-
+        # Sometimes it is worth skipping this step
+        # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
+        call bqsrApply as bqsr {
+            input:
+            reference = reference,
+            reference_fai = reference_fai,
+            reference_dict = reference_dict,
+            bam = select_first([cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+            bam_bai = select_first([cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
+            interval_list = target_intervals,
+            known_sites = bqsr_known_sites,
+            known_sites_tbi = bqsr_known_sites_tbi,
+            output_name = tumor_sample_name
+        }
     }
 
     # Obtains Alignment Metrics and Insert Size Metrics
     call Metrics as collectAllMetrics {
         input:
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai,
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
         reference = reference,
         reference_fai = reference_fai,
         reference_dict = reference_dict,
@@ -343,8 +358,8 @@ workflow boltonlab_CH {
     # Collects QC for various levels defined by the User
     call collectHsMetrics as collectRoiHsMetrics {
         input:
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai,
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
         reference = reference,
         reference_fai = reference_fai,
         reference_dict = reference_dict,
@@ -361,8 +376,8 @@ workflow boltonlab_CH {
     scatter(interval in summary_intervals) {
         call collectHsMetrics as collectSummaryHsMetrics{
             input:
-            bam = bqsr.bqsr_bam,
-            bam_bai = bqsr.bqsr_bam_bai,
+            bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+            bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
             reference = reference,
             reference_fai = reference_fai,
             reference_dict = reference_dict,
@@ -380,8 +395,8 @@ workflow boltonlab_CH {
     scatter(interval in per_base_intervals) {
         call collectHsMetrics as collectPerBaseHsMetrics {
             input:
-            bam = bqsr.bqsr_bam,
-            bam_bai = bqsr.bqsr_bam_bai,
+            bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+            bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
             reference = reference,
             reference_fai = reference_fai,
             reference_dict = reference_dict,
@@ -399,8 +414,8 @@ workflow boltonlab_CH {
     scatter(interval in per_target_intervals) {
         call collectHsMetrics as collectPerTargetHsMetrics{
             input:
-            bam = bqsr.bqsr_bam,
-            bam_bai = bqsr.bqsr_bam_bai,
+            bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+            bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
             reference = reference,
             reference_fai = reference_fai,
             reference_dict = reference_dict,
@@ -417,8 +432,8 @@ workflow boltonlab_CH {
 
     call samtoolsFlagstat {
         input:
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai,
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file])
     }
 
     # Uses the OMNI vcf to calculate possible contamination within the Sample
@@ -434,15 +449,15 @@ workflow boltonlab_CH {
 
     call verifyBamId {
         input:
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai,
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
         vcf=selectVariants.filtered_vcf
     }
 
     call fastQC {
         input:
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file])
     }
 
     # Some of our callers use BED file instead of interval list
@@ -463,18 +478,39 @@ workflow boltonlab_CH {
         input:
         somalier_vcf = createSomalierVcf.somalier_vcf,
         reference = reference,
-        bam = bqsr.bqsr_bam,
-        bam_bai = bqsr.bqsr_bam_bai,
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
         sample_name = tumor_sample_name
     }
 
     # In order to parallelize as much as the workflow as possible, we analyze by chromosome
-    call splitBedToChr as split_bed_to_chr {
+    call splitBedToChr {
         input:
+            interval_bed = interval_to_bed.interval_bed
+    }
+
+    call splitBAMToChr {
+        input:
+        bam = select_first([bqsr.bqsr_bam, cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file]),
+        bam_bai = select_first([bqsr.bqsr_bai, cramToBAM.bai, filterClipAndCollectMetrics.clipped_bai, clipAndCollectMetrics.clipped_bai, aligned_bai_file]),
         interval_bed = interval_to_bed.interval_bed
     }
 
-    scatter (chr_bed in split_bed_to_chr.split_chr) {
+    Array[Pair[File, Pair[File, File]]] splitBedandBAM = zip(splitBedToChr.split_chr, splitBAMToChr.split_bam_chr)
+
+    scatter (bed_bam_chr in splitBedandBAM) {
+
+        call indexBam as chr_bam {
+            input:
+            input_bam = bed_bam_chr.right.left,
+            sample_name = tumor_sample_name,
+            reference = reference,
+            reference_fai = reference_fai,
+            reference_dict = reference_dict
+        }
+
+        # Have to index here...
+
         # Mutect
         if (tumor_only) {
             call mutectTumorOnly as mutectTumorTask {
@@ -484,9 +520,9 @@ workflow boltonlab_CH {
               reference_dict = reference_dict,
               gnomad = normalized_gnomad_exclude,
               gnomad_tbi = normalized_gnomad_exclude_tbi,
-              tumor_bam = bqsr.bqsr_bam,
-              tumor_bam_bai = bqsr.bqsr_bam_bai,
-              interval_list = chr_bed
+              tumor_bam = chr_bam.bam,
+              tumor_bam_bai = chr_bam.bai,
+              interval_list = bed_bam_chr.left
             }
         }
 
@@ -498,11 +534,11 @@ workflow boltonlab_CH {
               reference_dict = reference_dict,
               gnomad = normalized_gnomad_exclude,
               gnomad_tbi = normalized_gnomad_exclude_tbi,
-              tumor_bam = bqsr.bqsr_bam,
-              tumor_bam_bai = bqsr.bqsr_bam_bai,
+              tumor_bam = chr_bam.bam,
+              tumor_bam_bai = chr_bam.bai,
               normal_bam = normal_bam,
               normal_bam_bai = normal_bam_bai,
-              interval_list = chr_bed
+              interval_list = bed_bam_chr.left
             }
         }
 
@@ -548,9 +584,9 @@ workflow boltonlab_CH {
                 input:
                 reference = reference,
                 reference_fai = reference_fai,
-                tumor_bam = bqsr.bqsr_bam,
-                tumor_bam_bai = bqsr.bqsr_bam_bai,
-                interval_bed = chr_bed,
+                tumor_bam = chr_bam.bam,
+                tumor_bam_bai = chr_bam.bai,
+                interval_bed = bed_bam_chr.left,
                 min_var_freq = af_threshold,
                 tumor_sample_name = tumor_sample_name
             }
@@ -561,12 +597,12 @@ workflow boltonlab_CH {
                 input:
                 reference = reference,
                 reference_fai = reference_fai,
-                tumor_bam = bqsr.bqsr_bam,
-                tumor_bam_bai = bqsr.bqsr_bam_bai,
+                tumor_bam = chr_bam.bam,
+                tumor_bam_bai = chr_bam.bai,
                 tumor_sample_name = tumor_sample_name,
                 normal_bam = normal_bam,
-                normal_bam = normal_bam_bai,
-                interval_bed = chr_bed,
+                normal_bam_bai = normal_bam_bai,
+                interval_bed = bed_bam_chr.left,
                 min_var_freq = af_threshold
             }
         }
@@ -619,14 +655,22 @@ workflow boltonlab_CH {
         }
 
         # Lofreq
+        call lofreq_indelqual {
+            input:
+            reference = reference,
+            reference_fai = reference_fai,
+            tumor_bam = chr_bam.bam,
+            tumor_bam_bai = chr_bam.bai
+        }
+
         if (tumor_only) {
             call lofreqTumorOnly as lofreqTumorTask {
                 input:
                 reference = reference,
                 reference_fai = reference_fai,
-                tumor_bam = bqsr.bqsr_bam,
-                tumor_bam_bai = bqsr.bqsr_bam_bai,
-                interval_bed = chr_bed
+                tumor_bam = lofreq_indelqual.output_indel_qual_bam,
+                tumor_bam_bai = lofreq_indelqual.output_indel_qual_bai,
+                interval_bed = bed_bam_chr.left
             }
         }
 
@@ -635,11 +679,11 @@ workflow boltonlab_CH {
                 input:
                 reference = reference,
                 reference_fai = reference_fai,
-                tumor_bam = bqsr.bqsr_bam,
-                tumor_bam_bai = bqsr.bqsr_bam_bai,
+                tumor_bam = lofreq_indelqual.output_indel_qual_bam,
+                tumor_bam_bai = lofreq_indelqual.output_indel_qual_bai,
                 normal_bam = normal_bam,
                 normal_bam_bai = normal_bam_bai,
-                interval_bed = chr_bed
+                interval_bed = bed_bam_chr.left
             }
         }
 
@@ -695,9 +739,9 @@ workflow boltonlab_CH {
                 reference = reference,
                 reference_fai = reference_fai,
                 reference_dict = reference_dict,
-                tumor_bam = bqsr.bqsr_bam,
-                tumor_bam_bai = bqsr.bqsr_bam_bai,
-                region_file = chr_bed,
+                tumor_bam = chr_bam.bam,
+                tumor_bam_bai = chr_bam.bai,
+                region_file = bed_bam_chr.left,
                 insert_size = pindel_insert_size,
                 tumor_sample_name = tumor_sample_name
             }
@@ -723,11 +767,11 @@ workflow boltonlab_CH {
                 reference = reference,
                 reference_fai = reference_fai,
                 reference_dict = reference_dict,
-                tumor_bam = bqsr.bqsr_bam,
-                tumor_bam_bai = bqsr.bqsr_bam_bai,
+                tumor_bam = chr_bam.bam,
+                tumor_bam_bai = chr_bam.bai,
                 normal_bam = normal_bam,
                 normal_bam_bai = normal_bam_bai,
-                region_file = chr_bed,
+                region_file = bed_bam_chr.left,
                 tumor_sample_name = tumor_sample_name,
                 normal_sample_name = "NORMAL",
                 insert_size = pindel_insert_size
@@ -784,7 +828,7 @@ workflow boltonlab_CH {
             input:
             reference=reference,
             reference_fai=reference_fai,
-            bam = bqsr.bqsr_bam,
+            bam = chr_bam.bam,
             vcf=mergeCallers.merged_vcf,
             sample_name=tumor_sample_name,
             min_var_freq=af_threshold,
@@ -1023,8 +1067,8 @@ workflow boltonlab_CH {
 
     output {
         # Alignments
-        File? aligned_bam = select_first([filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam])
-        File bqsr_bam = bqsr.bqsr_bam
+        File aligned_bam = select_first([cramToBAM.bam, filterClipAndCollectMetrics.clipped_bam, clipAndCollectMetrics.clipped_bam, aligned_bam_file])
+        File? bqsr_bam = bqsr.bqsr_bam
 
         # Tumor QC
         File tumor_insert_size_metrics = collectAllMetrics.insert_size_metrics
@@ -1082,71 +1126,31 @@ workflow boltonlab_CH {
     }
 }
 
-task filterArcherUmiLength {
-    input {
-        File fastq1
-        File fastq2
-        Int umi_length
-        Float? mem_limit_override
-        Int? cpu_override
-    }
-
-    Int preemptible = 1
-    Int maxRetries = 0
-    Float data_size = size([fastq1, fastq2], "GB")
-    Int space_needed_gb = ceil(10 + 2 * data_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0]) #2 GB or 1 GB
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
-
-
-    runtime {
-        docker: "ubuntu:bionic"
-        memory: cores*memory + "GB"
-        cpu: cores
-        disks: "local-disk ~{space_needed_gb} SSD"
-        bootDiskSizeGb: space_needed_gb
-        preemptible: preemptible
-        maxRetries: maxRetries
-    }
-
-    command <<<
-        zcat ~{fastq1} | awk -v regex="AACCGCCAGGAGT" -v umi_length="~{umi_length}" 'BEGIN {FS = "\t" ; OFS = "\n"} {header = $0 ; getline seq ; getline qheader ; getline qseq ; split(seq,a,regex); if (length(a[1]) == umi_length) {print header, seq, qheader, qseq}}' > R1_filtered.fastq
-        gzip R1_filtered.fastq
-        cp ~{fastq2} R2_filtered.fastq.gz
-    >>>
-
-    output {
-        File fastq1_filtered = "R1_filtered.fastq.gz"
-        File fastq2_filtered = "R2_filtered.fastq.gz"
-    }
-}
-
 task bamToFastq {
     input {
         File unaligned_bam
         Float? mem_limit_override
-        Int? cpu_override
     }
 
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size(unaligned_bam, "GB")
     Int space_needed_gb = ceil(10 + 2 * data_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0]) #2 GB or 1 GB
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Float memory = select_first([mem_limit_override, 6])
+    Int cores = 1
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "mgibio/rnaseq:1.0.0"
-        memory: cores*memory + "GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
-        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
 
     command <<<
-        /usr/bin/java -Xmx4g -jar /opt/picard/picard.jar SamToFastq VALIDATION_STRINGENCY=SILENT I=~{unaligned_bam} F=read1.fastq F2=read2.fastq
+        /usr/bin/java -Xmx~{memory_total}g -Djava.io.tmpdir=`pwd`/tmp -jar /opt/picard/picard.jar SamToFastq VALIDATION_STRINGENCY=SILENT I=~{unaligned_bam} F=read1.fastq F2=read2.fastq
     >>>
 
     output {
@@ -1155,33 +1159,44 @@ task bamToFastq {
     }
 }
 
-task bbmapRepair {
+task filterArcherUMILengthAndbbmapRepair {
     input {
         File fastq1
         File fastq2
+        Int umi_length
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size([fastq1, fastq2], "GB")
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = ceil(10 + 2 * data_size)
-    Float memory = select_first([mem_limit_override, if 4.0 * data_size > 12.0 then ceil(4.0 * data_size) else 12.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/3 + 10)]) # 12
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "quay.io/biocontainers/bbmap:38.92--he522d1c_0"
-        memory: cores*memory + "GB"
+        memory: cores * memory + "GB"
         cpu: cores
-        bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
         maxRetries: maxRetries
     }
 
     command <<<
-        repair.sh -Xmx10g repair=t overwrite=true interleaved=false outs=singletons.fq out1=R1.fixed.fastq.gz out2=R2.fixed.fastq.gz in1=~{fastq1} in2=~{fastq2}
+        zcat ~{fastq1} | awk -v regex="AACCGCCAGGAGT" -v umi_length="~{umi_length}" 'BEGIN {FS = "\t" ; OFS = "\n"} {header = $0 ; getline seq ; getline qheader ; getline qseq ; split(seq,a,regex); if (length(a[1]) == umi_length) {print header, seq, qheader, qseq}}' | \
+        repair.sh -Xmx~{memory_total}g \
+            repair=t \
+            overwrite=true \
+            interleaved=false \
+            outs=singletons.fq \
+            out1=R1.fixed.fastq.gz \
+            out2=R2.fixed.fastq.gz \
+            in1=stdin \
+            in2=~{fastq2}
     >>>
 
     output {
@@ -1201,26 +1216,29 @@ task fastqToBam {
         String platform
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size([fastq1, fastq2], "GB")
-    Int space_needed_gb = ceil(10 + 2 * data_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "mgibio/dna-alignment:1.0.0"
-        memory:  cores*memory + "GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
+        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
 
     command <<<
-        /usr/bin/java -Xmx4g -jar /opt/picard/picard.jar FastqToSam FASTQ=~{fastq1} FASTQ2=~{fastq2} SAMPLE_NAME=~{sample_name} LIBRARY_NAME=~{library_name} PLATFORM_UNIT=~{platform_unit} PLATFORM=~{platform} OUTPUT=unaligned.bam
+        /usr/bin/java -Xmx~{memory_total}g -Djava.io.tmpdir=`pwd`/tmp -jar /opt/picard/picard.jar FastqToSam FASTQ=~{fastq1} FASTQ2=~{fastq2} SAMPLE_NAME=~{sample_name} LIBRARY_NAME=~{library_name} PLATFORM_UNIT=~{platform_unit} PLATFORM=~{platform} OUTPUT=unaligned.bam
     >>>
 
     output {
@@ -1235,18 +1253,20 @@ task extractUmis {
         Boolean? umi_paired = true
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size(bam, "GB")
-    Int space_needed_gb = ceil(10 + 2 * data_size)
     Int preemptible = 1
     Int maxRetries = 0
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "quay.io/biocontainers/fgbio:1.3.0--0"
-        memory: cores*memory + "GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
@@ -1255,10 +1275,44 @@ task extractUmis {
 
     command <<<
         if [ "~{umi_paired}" == true ]; then
-            /usr/local/bin/fgbio ExtractUmisFromBam --molecular-index-tags ZA ZB --single-tag RX --input ~{bam} --read-structure ~{sep=" " read_structure} --output umi_extracted.bam
+            /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp ExtractUmisFromBam --molecular-index-tags ZA ZB --single-tag RX --input ~{bam} --read-structure ~{sep=" " read_structure} --output umi_extracted.bam
         else
-            /usr/local/bin/fgbio ExtractUmisFromBam --molecular-index-tags ZA --single-tag RX --input ~{bam} --read-structure ~{sep=" " read_structure} --output umi_extracted.bam
+            /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp ExtractUmisFromBam --molecular-index-tags ZA --single-tag RX --input ~{bam} --read-structure ~{sep=" " read_structure} --output umi_extracted.bam
         fi
+    >>>
+
+    output {
+        File umi_extracted_bam = "umi_extracted.bam"
+    }
+}
+
+task copyUMIFromReadName {
+    input {
+        File bam
+        Float? mem_limit_override
+        Int? cpu_override
+        Int? disk_size_override
+    }
+
+    Float data_size = size(bam, "GB")
+    Int preemptible = 1
+    Int maxRetries = 0
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
+
+    runtime {
+        docker: "quay.io/biocontainers/fgbio:2.0.2--hdfd78af_0"
+        memory: cores * memory + "GB"
+        cpu: cores
+        disks: "local-disk ~{space_needed_gb} SSD"
+        preemptible: preemptible
+        maxRetries: maxRetries
+    }
+
+    command <<<
+        /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CopyUmiFromReadName -i ~{bam} -o umi_extracted.bam
     >>>
 
     output {
@@ -1271,27 +1325,28 @@ task markIlluminaAdapters {
         File bam
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size(bam, "GB")
-    Int space_needed_gb = ceil(10 + 2 * data_size)
     Int preemptible = 1
     Int maxRetries = 0
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "mgibio/dna-alignment:1.0.0"
         memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
-        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
 
     command <<<
-        /usr/bin/java -Xmx4g -jar /opt/picard/picard.jar MarkIlluminaAdapters INPUT=~{bam} OUTPUT=marked.bam METRICS=adapter_metrics.txt
+        /usr/bin/java -Xmx~{memory_total}g -Djava.io.tmpdir=`pwd`/tmp -jar /opt/picard/picard.jar MarkIlluminaAdapters INPUT=~{bam} OUTPUT=marked.bam METRICS=adapter_metrics.txt
     >>>
 
     output {
@@ -1313,15 +1368,16 @@ task umiAlign {
         File reference_sa
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size(bam, "GB")
     Float reference_size = size([reference, reference_amb, reference_ann, reference_bwt, reference_pac, reference_sa], "GB")
-    Int space_needed_gb = ceil(10 + 10 * data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 48.0 then floor(memory / 24)*8 else 8])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory/18)*8 else 8])
 
     runtime {
       docker: "mgibio/dna-alignment:1.0.0"
@@ -1351,21 +1407,23 @@ task groupReadsAndConsensus {
         Boolean umi_paired = true
         Float? mem_limit_override
         Int? cpu_override
+        Int? reads_per_umi_group = 1
+        Int? disk_size_override
     }
 
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size(bam, "GB")
-    Int space_needed_gb = ceil(10 + 2 * data_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(4.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/3 + 10)]) # 12
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "quay.io/biocontainers/fgbio:1.3.0--0"
         memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
-        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
@@ -1377,11 +1435,11 @@ task groupReadsAndConsensus {
         BAM=~{bam}
 
         if [ "$PAIRED" == true ]; then
-            /usr/local/bin/fgbio GroupReadsByUmi --strategy paired --assign-tag MI --raw-tag RX --min-map-q 1 --edits 1 --input $BAM --output umi_grouped.bam
+            /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp GroupReadsByUmi --strategy paired --assign-tag MI --raw-tag RX --min-map-q 1 --edits 1 --input $BAM --output umi_grouped.bam
         else
-            /usr/local/bin/fgbio GroupReadsByUmi --strategy adjacency --assign-tag MI --raw-tag RX --min-map-q 1 --edits 1 --input $BAM --output umi_grouped.bam
+            /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp GroupReadsByUmi --strategy adjacency --assign-tag MI --raw-tag RX --min-map-q 1 --edits 1 --input $BAM --output umi_grouped.bam
         fi
-        /usr/local/bin/fgbio CallMolecularConsensusReads --input umi_grouped.bam --error-rate-pre-umi 45 --error-rate-post-umi 30 --min-input-base-quality 30 --min-reads 1 --output consensus_unaligned.bam
+        /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CallMolecularConsensusReads --input umi_grouped.bam --error-rate-pre-umi 45 --error-rate-post-umi 30 --min-input-base-quality 30 --min-reads ~{reads_per_umi_group} --output consensus_unaligned.bam
     >>>
 
     output {
@@ -1403,15 +1461,16 @@ task realign {
         File reference_sa
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size(bam, "GB")
     Float reference_size = size([reference, reference_amb, reference_ann, reference_bwt, reference_pac, reference_sa], "GB")
-    Int space_needed_gb = ceil(10 + 10*data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 48.0 then floor(memory / 24)*8 else 8])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*8 else 8])
 
     runtime {
         docker: "mgibio/dna-alignment:1.0.0"
@@ -1439,6 +1498,7 @@ task filterClipAndCollectMetrics {
         File reference
         File reference_fai
         File reference_dict
+        String sample_name
         Array[Int] min_reads = [1]
         Float? max_read_error_rate = 0.05
         Float? max_base_error_rate = 0.1
@@ -1449,21 +1509,22 @@ task filterClipAndCollectMetrics {
         Boolean umi_paired = true
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size(bam, "GB")
     Float reference_size = size([reference, reference_fai, reference_dict], "GB")
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = ceil(10 + 2 * data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "quay.io/biocontainers/fgbio:1.3.0--0"
         memory: cores * memory + "GB"
         cpu: cores
-        bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
         maxRetries: maxRetries
@@ -1472,8 +1533,8 @@ task filterClipAndCollectMetrics {
     command <<<
         set -eo pipefail
 
-        /usr/local/bin/fgbio FilterConsensusReads --input ~{bam} --output consensus_filtered.bam --ref ~{reference} --min-reads ~{sep=" " min_reads} --max-read-error-rate ~{max_read_error_rate} --max-base-error-rate ~{max_base_error_rate} --min-base-quality ~{min_base_quality} --max-no-call-fraction ~{max_no_call_fraction}
-        /usr/local/bin/fgbio ClipBam --input consensus_filtered.bam --ref ~{reference} --clipping-mode Hard --clip-overlapping-reads true --output clipped.bam
+        /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp FilterConsensusReads --input ~{bam} --output consensus_filtered.bam --ref ~{reference} --min-reads ~{sep=" " min_reads} --max-read-error-rate ~{max_read_error_rate} --max-base-error-rate ~{max_base_error_rate} --min-base-quality ~{min_base_quality} --max-no-call-fraction ~{max_no_call_fraction}
+        /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp ClipBam --input consensus_filtered.bam --ref ~{reference} --clipping-mode Hard --clip-overlapping-reads true --output ~{sample_name}.bam
 
         PAIRED=~{umi_paired}
         DESCRIPTION=~{description}
@@ -1482,15 +1543,15 @@ task filterClipAndCollectMetrics {
         if [ "$PAIRED" == true ]; then
             if [[ -z "$DESCRIPTION" ]]; then
                 if [[ -z "$INTERVALS" ]]; then
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --output duplex_seq.metrics
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --output duplex_seq.metrics
                 else
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --output duplex_seq.metrics --intervals ${INTERVALS}
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --output duplex_seq.metrics --intervals ${INTERVALS}
                 fi
             else
                 if [[ -z "$INTERVALS" ]]; then
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --description ${DESCRIPTION} --output duplex_seq.metrics
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --description ${DESCRIPTION} --output duplex_seq.metrics
                 else
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --description ${DESCRIPTION} --output duplex_seq.metrics --intervals ${INTERVALS}
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --description ${DESCRIPTION} --output duplex_seq.metrics --intervals ${INTERVALS}
                 fi
             fi
         else
@@ -1499,8 +1560,8 @@ task filterClipAndCollectMetrics {
     >>>
 
     output {
-        File clipped_bam = "clipped.bam"
-        File clipped_bam_bai = "clipped.bai"
+        File clipped_bam = "~{sample_name}.bam"
+        File clipped_bai = "~{sample_name}.bai"
         Array[File] duplex_seq_metrics = glob("duplex_seq.metrics.*")
     }
 }
@@ -1511,26 +1572,28 @@ task clipAndCollectMetrics {
         File reference
         File reference_fai
         File reference_dict
+        String sample_name
         File? target_intervals
         String description
         Boolean umi_paired = true
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size(bam, "GB")
     Float reference_size = size([reference, reference_fai, reference_dict], "GB")
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = ceil(10 + 2 * data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         docker: "quay.io/biocontainers/fgbio:1.3.0--0"
         memory: cores * memory + "GB"
         cpu: cores
-        bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
         maxRetries: maxRetries
@@ -1539,7 +1602,7 @@ task clipAndCollectMetrics {
     command <<<
         set -eo pipefail
 
-        /usr/local/bin/fgbio ClipBam --input ~{bam} --ref ~{reference} --clipping-mode Hard --clip-overlapping-reads true --output clipped.bam
+        /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp ClipBam --input ~{bam} --ref ~{reference} --clipping-mode Hard --clip-overlapping-reads true --output ~{sample_name}.bam
 
         PAIRED=~{umi_paired}
         DESCRIPTION=~{description}
@@ -1548,15 +1611,15 @@ task clipAndCollectMetrics {
         if [ "$PAIRED" == true ]; then
             if [[ -z "$DESCRIPTION" ]]; then
                 if [[ -z "$INTERVALS" ]]; then
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --output duplex_seq.metrics
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --output duplex_seq.metrics
                 else
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --output duplex_seq.metrics --intervals ${INTERVALS}
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --output duplex_seq.metrics --intervals ${INTERVALS}
                 fi
             else
                 if [[ -z "$INTERVALS" ]]; then
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --description ${DESCRIPTION} --output duplex_seq.metrics
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --description ${DESCRIPTION} --output duplex_seq.metrics
                 else
-                    /usr/local/bin/fgbio CollectDuplexSeqMetrics --input clipped.bam --description ${DESCRIPTION} --output duplex_seq.metrics --intervals ${INTERVALS}
+                    /usr/local/bin/fgbio -Xmx~{memory_total}g --tmp-dir=`pwd`/large_tmp CollectDuplexSeqMetrics --input ~{sample_name}.bam --description ${DESCRIPTION} --output duplex_seq.metrics --intervals ${INTERVALS}
                 fi
             fi
         else
@@ -1565,9 +1628,96 @@ task clipAndCollectMetrics {
     >>>
 
     output {
-        File clipped_bam = "clipped.bam"
-        File clipped_bam_bai = "clipped.bai"
+        File clipped_bam = "~{sample_name}.bam"
+        File clipped_bai = "~{sample_name}.bai"
         Array[File] duplex_seq_metrics = glob("duplex_seq.metrics.*")
+    }
+}
+
+task cramToBAM {
+    input {
+        File input_cram
+        String sample_name
+        File reference
+        File reference_fai
+        File reference_dict
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
+    }
+
+    Float data_size = size(input_cram, "GB")
+    Float reference_size = size([reference, reference_fai, reference_dict], "GB")
+    Int preemptible = 1
+    Int maxRetries = 0
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+
+    runtime {
+        cpu: cores
+        docker: "quay.io/biocontainers/samtools:1.11--h6270b1f_0"
+        memory: cores * memory + "GB"
+        disks: "local-disk ~{space_needed_gb} SSD"
+        preemptible: preemptible
+        maxRetries: maxRetries
+    }
+
+    String bam_link = sub(basename(input_cram), basename(basename(input_cram, ".bam"), ".cram"), sample_name)
+
+    command <<<
+        ln -s ~{input_cram} ~{bam_link}
+        /usr/local/bin/samtools view -b -T ~{reference} -o ~{sample_name}.bam ~{bam_link}
+        /usr/local/bin/samtools index ~{sample_name}.bam
+    >>>
+
+    output {
+        File bam = "~{sample_name}.bam"
+        File bai = "~{sample_name}.bam.bai"
+        #File bai = sub(sub(bam_link, "bam$", "bam.bai"), "cram$", "cram.crai")
+    }
+}
+
+task indexBam {
+    input {
+        File input_bam
+        String sample_name
+        File reference
+        File reference_fai
+        File reference_dict
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
+    }
+
+    Float data_size = size(input_bam, "GB")
+    Float reference_size = size([reference, reference_fai, reference_dict], "GB")
+    Int preemptible = 1
+    Int maxRetries = 0
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+
+    runtime {
+        cpu: cores
+        docker: "quay.io/biocontainers/samtools:1.11--h6270b1f_0"
+        memory: cores * memory + "GB"
+        disks: "local-disk ~{space_needed_gb} SSD"
+        preemptible: preemptible
+        maxRetries: maxRetries
+    }
+
+    String bam_link = sub(basename(input_bam), basename(basename(input_bam, ".bam"), ".cram"), sample_name)
+
+    command <<<
+        ln -s ~{input_bam} ~{bam_link}
+        /usr/local/bin/samtools index ~{sample_name}.bam
+    >>>
+
+    output {
+        File bam = "~{sample_name}.bam"
+        File bai = "~{sample_name}.bam.bai"
+        #File bai = sub(sub(bam_link, "bam$", "bam.bai"), "cram$", "cram.crai")
     }
 }
 
@@ -1581,18 +1731,21 @@ task bqsrApply {
         String output_name = "final"
         Array[File] known_sites
         Array[File] known_sites_tbi  # secondaryFiles...
-        Array[String] intervals = ["chr1", "chr2", "chr3", "chr4", "chr5","chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22", "chrX", "chrY"]
+        #Array[String] intervals = ["chr1", "chr2", "chr3", "chr4", "chr5","chr6", "chr7", "chr8", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22", "chrX", "chrY"]
+        File interval_list
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size([bam, bam_bai], "GB")
     Float reference_size = size(known_sites, "GB") + size(known_sites_tbi, "GB") + size([reference, reference_fai, reference_dict], "GB")
     Int preemptible = 1
-    Int maxRetries = 0
-    Int space_needed_gb = ceil(10 + 2 * data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 18.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int maxRetries = 1
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/3 + 10)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         cpu: cores
@@ -1604,13 +1757,13 @@ task bqsrApply {
     }
 
     command <<<
-        /gatk/gatk --java-options -Xmx16g BaseRecalibrator -O bqsr.table ~{sep=" " prefix("-L ", intervals)} -R ~{reference} -I ~{bam} ~{sep=" " prefix("--known-sites ", known_sites)}
-        /gatk/gatk --java-options -Xmx16g ApplyBQSR -O ~{output_name}.bam ~{sep=" " prefix("--static-quantized-quals ", [10, 20, 30])} -R ~{reference} -I ~{bam} -bqsr bqsr.table
+        /gatk/gatk --java-options -Xmx~{memory_total}g BaseRecalibrator -O bqsr.table -L ~{interval_list} -R ~{reference} -I ~{bam} ~{sep=" " prefix("--known-sites ", known_sites)}
+        /gatk/gatk --java-options -Xmx~{memory_total}g ApplyBQSR -O ~{output_name}.bam ~{sep=" " prefix("--static-quantized-quals ", [10, 20, 30])} -R ~{reference} -I ~{bam} -bqsr bqsr.table
     >>>
 
     output {
         File bqsr_bam = "~{output_name}.bam"
-        File bqsr_bam_bai = "~{output_name}.bai"
+        File bqsr_bai = "~{output_name}.bai"
     }
 }
 
@@ -1624,20 +1777,22 @@ task Metrics {
         String metric_accumulation_level
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size([bam, bam_bai], "GB")
     Float reference_size = size([reference, reference_fai, reference_dict], "GB")
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = ceil(10 + data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         memory: cores * memory + "GB"
         docker: "broadinstitute/picard:2.23.6"
-        disks: "local-disk ~{space_needed_gb} SSD"
+        disks: "local-disk ~{space_needed_gb} HDD"
         cpu: cores
         preemptible: preemptible
         maxRetries: maxRetries
@@ -1649,14 +1804,14 @@ task Metrics {
     String size_histogram = "~{bamroot}.InsertSizeHistogram.pdf"
 
     command <<<
-        /usr/bin/java -Xmx6g -jar /usr/picard/picard.jar CollectAlignmentSummaryMetrics INPUT=~{bam} OUTPUT=~{summary_metrics} REFERENCE_SEQUENCE=~{reference} METRIC_ACCUMULATION_LEVEL=~{metric_accumulation_level}
-        /usr/bin/java -Xmx6g -jar /usr/picard/picard.jar CollectInsertSizeMetrics O=~{size_metrics} H=~{size_histogram} I=~{bam} REFERENCE_SEQUENCE=~{reference} METRIC_ACCUMULATION_LEVEL=~{metric_accumulation_level}
+        /usr/bin/java -Xmx~{memory_total}g -Djava.io.tmpdir=`pwd`/tmp -jar /usr/picard/picard.jar CollectAlignmentSummaryMetrics INPUT=~{bam} OUTPUT=~{summary_metrics} REFERENCE_SEQUENCE=~{reference} METRIC_ACCUMULATION_LEVEL=~{metric_accumulation_level}
+        /usr/bin/java -Xmx~{memory_total}g -Djava.io.tmpdir=`pwd`/tmp -jar /usr/picard/picard.jar CollectInsertSizeMetrics O=~{size_metrics} H=~{size_histogram} I=~{bam} REFERENCE_SEQUENCE=~{reference} METRIC_ACCUMULATION_LEVEL=~{metric_accumulation_level}
     >>>
 
     output {
-    File alignment_summary_metrics = summary_metrics
-    File insert_size_histogram = size_histogram
-    File insert_size_metrics = size_metrics
+        File alignment_summary_metrics = summary_metrics
+        File insert_size_histogram = size_histogram
+        File insert_size_metrics = size_metrics
     }
 }
 
@@ -1680,20 +1835,22 @@ task collectHsMetrics {
 
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size([bam, bam_bai], "GB")
     Float reference_size = size([reference, reference_fai, reference_dict, bait_intervals, target_intervals], "GB")
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = ceil(10 + data_size + reference_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/3 + 10)]) # 12
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int memory_total = floor(memory)-2
 
     runtime {
         memory: cores * memory + "GB"
         docker: "broadinstitute/picard:2.23.6"
-        disks: "local-disk ~{space_needed_gb} SSD"
+        disks: "local-disk ~{space_needed_gb} HDD"
         cpu: cores
         preemptible: preemptible
         maxRetries: maxRetries
@@ -1705,7 +1862,7 @@ task collectHsMetrics {
     String per_base_txt = "~{bamroot}.~{output_prefix}-PerBaseCoverage.txt"
 
     command <<<
-        /usr/bin/java -Xmx6g -jar /usr/picard/picard.jar CollectHsMetrics \
+        /usr/bin/java -Xmx~{memory_total}g -Djava.io.tmpdir=`pwd`/tmp -jar /usr/picard/picard.jar CollectHsMetrics \
         O=~{hs_txt} \
         I=~{bam} \
         R=~{reference} \
@@ -1731,19 +1888,20 @@ task samtoolsFlagstat {
         File bam_bai
         Float? mem_limit_override
         Int? cpu_override
+        Int? disk_size_override
     }
 
     Float data_size = size([bam, bam_bai], "GB")
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = ceil(5 + data_size)
-    Float memory = select_first([mem_limit_override, if 2.0 * data_size > 6.0 then ceil(2.0 * data_size) else 6.0])
-    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 32) else 1])
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "quay.io/biocontainers/samtools:1.11--h6270b1f_0"
         memory: cores * memory + "GB"
-        disks: "local-disk ~{space_needed_gb} SSD"
+        disks: "local-disk ~{space_needed_gb} HDD"
         cpu: cores
         preemptible: preemptible
         maxRetries: maxRetries
@@ -1776,17 +1934,24 @@ task selectVariants {
 
         # ENUM: one of ["INDEL", "SNP", "MIXED", "MNP", "SYMBOLIC", "NO_VARIATION"]
         String? select_type
+
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 5 + round(size([vcf, vcf_tbi], "GB")*3 + size([reference, reference_fai, reference_dict, interval_list], "GB"))
+    Float data_size = size([vcf, vcf_tbi], "GB")
+    Float reference_size = size([reference, reference_fai, reference_dict, interval_list], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
     Int preemptible = 1
     Int maxRetries = 0
-    Int cores = 1
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "broadinstitute/gatk:4.2.0.0"
-        memory: "6GB"
-        disks: "local-disk ~{space_needed_gb} SSD"
+        memory: cores * memory + "GB"
+        disks: "local-disk ~{space_needed_gb} HDD"
         cpu: cores
         preemptible: preemptible
         maxRetries: maxRetries
@@ -1816,16 +1981,21 @@ task verifyBamId {
         File vcf
         File bam
         File bam_bai
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 5 + round(size([bam, bam_bai, vcf], "GB"))
+    Float data_size = size([bam, bam_bai, vcf], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
     Int preemptible = 1
     Int maxRetries = 0
-    Int cores = 1
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "mgibio/verify_bam_id-cwl:1.1.3"
-        memory: "4GB"
+        memory: cores * memory + "GB"
         disks: "local-disk ~{space_needed_gb} SSD"
         cpu: cores
         preemptible: preemptible
@@ -1849,17 +2019,21 @@ task fastQC {
     input {
         File bam
         File bam_bai
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size([bam, bam_bai], "GB")
-    Int space_needed_gb = 10 + round(data_size)
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "biocontainers/fastqc:v0.11.9_cv8"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
         bootDiskSizeGb: space_needed_gb
@@ -1882,17 +2056,21 @@ task fastQC {
 task intervalsToBed {
     input {
         File interval_list
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size(interval_list, "GB")
-    Int space_needed_gb = 10 + round(data_size)
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "ubuntu:bionic"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
         bootDiskSizeGb: space_needed_gb
@@ -1923,17 +2101,21 @@ task createSomalierVcf {
         File chrom_sizes
         File af_only_snp_only_vcf
         File reference
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size([interval_bed, chrom_sizes, af_only_snp_only_vcf, reference], "GB")
-    Int space_needed_gb = 10 + round(data_size)
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "kboltonlab/bst:1.0"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
         bootDiskSizeGb: space_needed_gb
@@ -1942,7 +2124,12 @@ task createSomalierVcf {
     }
 
     command <<<
-        bedtools slop -i ~{interval_bed} -g ~{chrom_sizes} -b 100 > somalier.bed
+        bed_size=$(cat ~{interval_bed} | awk -F'\t' 'BEGIN{SUM=0}{ SUM+=$3-$2 }END{print SUM}')
+        if (( ${bed_size} > 2*65535 )); then
+            cp ~{interval_bed} somalier.bed
+        else
+            bedtools slop -i ~{interval_bed} -g ~{chrom_sizes} -b 100 > somalier.bed
+        fi
         bedtools intersect -a ~{af_only_snp_only_vcf} -b somalier.bed -header > somalier.vcf
         bcftools norm --multiallelics -any -Oz -o somalier.norm.vcf.gz -f ~{reference} somalier.vcf
     >>>
@@ -1959,20 +2146,23 @@ task somalier {
         File bam
         File bam_bai
         String sample_name = "tumor"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
     Float data_size = size([somalier_vcf, reference, bam, bam_bai], "GB")
-    Int space_needed_gb = 10 + round(data_size)
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
         docker: "brentp/somalier:latest"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
-        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
@@ -1989,17 +2179,23 @@ task somalier {
 task splitBedToChr {
     input {
         File interval_bed
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
-    Int space_needed_gb = 10 + round(size(interval_bed, "GB")*2)
+    Float data_size = size(interval_bed, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         cpu: cores
-        memory: "6GB"
+        memory: cores * memory + "GB"
         docker: "kboltonlab/bst:latest"
+        bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
         maxRetries: maxRetries
@@ -2017,6 +2213,46 @@ task splitBedToChr {
     }
 }
 
+task splitBAMToChr {
+    input {
+        File bam
+        File bam_bai
+        File interval_bed
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
+    }
+
+    Float data_size = size([interval_bed, bam], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int preemptible = 1
+    Int maxRetries = 0
+
+    runtime {
+        cpu: cores
+        memory: cores * memory + "GB"
+        docker: "kboltonlab/bst:latest"
+        bootDiskSizeGb: space_needed_gb
+        disks: "local-disk ~{space_needed_gb} SSD"
+        preemptible: preemptible
+        maxRetries: maxRetries
+    }
+
+    command <<<
+        intervals=$(awk '{print $1}' ~{interval_bed} | uniq)
+        for chr in ${intervals}; do
+            samtools view -b ~{bam} $chr > ~{basename(bam, ".bam")}_${chr}.bam
+            samtools index ~{basename(bam, ".bam")}_${chr}.bam
+        done
+    >>>
+
+    output {
+        Array[Pair[File, File]] split_bam_chr = zip(glob(basename(bam, ".bam")+"_*.bam"), glob(basename(bam, ".bam")+"_*.bam.bai"))
+    }
+}
+
 task mutectNormal {
     input {
         File reference
@@ -2026,27 +2262,28 @@ task mutectNormal {
         File? pon_tbi
         File? gnomad
         File? gnomad_tbi
-
         File tumor_bam
         File tumor_bam_bai
-
         File? normal_bam
         File? normal_bam_bai
-
         File interval_list
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Float reference_size = size([reference, reference_fai, reference_dict], "GB")
-    Float bam_size = size([tumor_bam, tumor_bam_bai, normal_bam, normal_bam_bai], "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_list, "GB"))
-    Int cores = 1
+    Float reference_size = size([reference, reference_fai, reference_dict, interval_list], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai, normal_bam, normal_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/2 + 20)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         cpu: cores
         docker: "broadinstitute/gatk:4.2.0.0"
-        memory: "32GB"
+        memory: cores * memory + "GB"
         bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
@@ -2091,21 +2328,24 @@ task mutectTumorOnly {
         File? gnomad_tbi
         File tumor_bam
         File tumor_bam_bai
-
         File interval_list
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Float reference_size = size([reference, reference_fai, reference_dict], "GB")
-    Float bam_size = size([tumor_bam, tumor_bam_bai], "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_list, "GB"))
-    Int cores = 1
+    Float reference_size = size([reference, reference_fai, reference_dict, interval_list], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/2 + 20)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         cpu: cores
         docker: "broadinstitute/gatk:4.2.0.0"
-        memory: "32GB"
+        memory: cores * memory + "GB"
         bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
@@ -2118,7 +2358,10 @@ task mutectTumorOnly {
         set -o pipefail
         set -o errexit
 
+        THREADS=$((~{cores}*4))
+
         /gatk/gatk Mutect2 --java-options "-Xmx20g" \
+        --native-pair-hmm-threads ${THREADS} \
             -O mutect.vcf.gz \
             -R ~{reference} \
             -L ~{interval_list} \
@@ -2149,15 +2392,23 @@ task mutectTumorOnly {
 task vcfSanitize {
     input {
         File vcf
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
+    Float data_size = size(vcf, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
-        memory: "6GB"
+        memory: cores * memory + "GB"
         cpu: cores
+        bootDiskSizeGb: space_needed_gb
+        disks: "local-disk ~{space_needed_gb} SSD"
         docker: "mgibio/samtools-cwl:1.0.0"
         preemptible: preemptible
         maxRetries: maxRetries
@@ -2195,18 +2446,23 @@ task bcftoolsNorm {
     input {
         File reference
         File reference_fai
-
         File vcf
         File vcf_tbi
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + round(size([vcf, vcf_tbi], "GB") * 2 + size([reference, reference_fai], "GB"))
-    Int cores = 1
+    Float data_size = size([vcf, vcf_tbi], "GB")
+    Float reference_size = size([reference, reference_fai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
-        memory: "6GB"
+        memory: cores * memory + "GB"
         docker: "kboltonlab/bst"
         disks: "local-disk ~{space_needed_gb} SSD"
         cpu: cores
@@ -2233,18 +2489,22 @@ task bcftoolsIsecComplement {
         File exclude_vcf_tbi
         String output_type = "z"
         String? output_vcf_name = "bcftools_isec.vcf"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + 2*round(size([vcf, vcf_tbi, exclude_vcf, exclude_vcf_tbi], "GB"))
-    Int cores = 1
+    Float data_size = size([vcf, vcf_tbi, exclude_vcf, exclude_vcf_tbi], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         cpu: cores
         docker: "kboltonlab/bst:latest"
-        memory: "6GB"
-        bootDiskSizeGb: space_needed_gb
+        memory: cores * memory + "GB"
         disks: "local-disk ~{space_needed_gb} SSD"
         preemptible: preemptible
         maxRetries: maxRetries
@@ -2267,18 +2527,24 @@ task pon2Percent {
         File vcf2PON_tbi
         String caller = "caller"
         String sample_name = "tumor"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + round(size([vcf, vcf2PON, vcf2PON_tbi],"GB"))
-    Int cores = 1
+    Float data_size = size([vcf, vcf2PON, vcf2PON_tbi],"GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       cpu: cores
       docker: "kboltonlab/bst:latest"
-      memory: "6GB"
+      memory: cores * memory + "GB"
       disks: "local-disk ~{space_needed_gb} SSD"
+      bootDiskSizeGb: space_needed_gb
       preemptible: preemptible
       maxRetries: maxRetries
     }
@@ -2311,18 +2577,23 @@ task vardictTumorOnly {
         String tumor_sample_name = "TUMOR"
         File interval_bed
         Float? min_var_freq = 0.005
+        Int? JavaXmx = 24
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 16
-    Float reference_size = size([reference, reference_fai], "GB")
-    Float bam_size = size([tumor_bam, tumor_bam_bai], "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_bed, "GB"))
+    Float reference_size = size([reference, reference_fai, interval_bed], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
     Int preemptible = 1
     Int maxRetries = 0
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 6)]) # We want the base to be around 7
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
 
     runtime {
-        docker: "kboltonlab/vardictjava:1.0"
-        memory: "96GB"
+        docker: "kboltonlab/vardictjava:bedtools"
+        memory: cores * memory + "GB"
         cpu: cores
         bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
@@ -2336,16 +2607,43 @@ task vardictTumorOnly {
         set -o pipefail
         set -o errexit
 
-        /opt/VarDictJava/build/install/VarDict/bin/VarDict \
-            -U -G ~{reference} \
-            -X 1 \
-            -f ~{min_var_freq} \
-            -N ~{tumor_sample_name} \
-            -b ~{tumor_bam} \
-            -c 1 -S 2 -E 3 -g 4 ~{interval_bed} \
-            -th ~{cores} | \
-        /opt/VarDictJava/build/install/VarDict/bin/teststrandbias.R | \
-        /opt/VarDictJava/build/install/VarDict/bin/var2vcf_valid.pl \
+        samtools index ~{tumor_bam}
+        bedtools makewindows -b ~{interval_bed} -w 20250 -s 20000 > ~{basename(interval_bed, ".bed")}_windows.bed
+        split -d --additional-suffix .bed -n l/16 ~{basename(interval_bed, ".bed")}_windows.bed splitBed.
+
+        nProcs=~{cores}
+        nJobs="\j"
+
+        for fName in splitBed.*.bed; do
+            # Wait until nJobs < nProcs, only start nProcs jobs at most
+            echo ${nJobs@P}
+            while (( ${nJobs@P} >= nProcs )); do
+                wait -n
+            done
+
+            part=$(echo $fName | cut -d'.' -f2)
+
+            echo ${fName}
+            echo ${part}
+
+            /opt/VarDictJava/build/install/VarDict/bin/VarDict \
+                -U -G ~{reference} \
+                -X 1 \
+                -f ~{min_var_freq} \
+                -N ~{tumor_sample_name} \
+                -b ~{tumor_bam} \
+                -c 1 -S 2 -E 3 -g 4 ${fName} \
+                -th ~{cores} \
+                --deldupvar -Q 10 -F 0x700 --fisher > result.${part}.txt &
+        done;
+        # Wait for all running jobs to finish
+        wait
+
+        for fName in result.*.txt; do
+            cat ${fName} >> resultCombine.txt
+        done;
+
+        cat resultCombine.txt | /opt/VarDictJava/build/install/VarDict/bin/var2vcf_valid.pl \
             -N "~{tumor_sample_name}" \
             -E \
             -f ~{min_var_freq} > ~{output_name}.vcf
@@ -2371,18 +2669,23 @@ task vardictNormal {
         String? normal_sample_name = "NORMAL"
         File interval_bed
         Float? min_var_freq = 0.005
+        Int? JavaXmx = 24
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 16
-    Float reference_size = size([reference, reference_fai], "GB")
-    Float bam_size = size([tumor_bam, tumor_bam_bai, normal_bam, normal_bam_bai], "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_bed, "GB"))
+    Float reference_size = size([reference, reference_fai, interval_bed], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 4 * data_size + reference_size)])
     Int preemptible = 1
     Int maxRetries = 0
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 6)]) # We want the base to be around 7
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
 
     runtime {
-        docker: "kboltonlab/vardictjava:1.0"
-        memory: "96GB"
+        docker: "kboltonlab/vardictjava:bedtools"
+        memory: cores * memory + "GB"
         cpu: cores
         bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
@@ -2395,17 +2698,44 @@ task vardictNormal {
         set -o pipefail
         set -o errexit
 
-        /opt/VarDictJava/build/install/VarDict/bin/VarDict \
-            -U -G ~{reference} \
-            -X 1 \
-            -f ~{min_var_freq} \
-            -N ~{tumor_sample_name} \
-            -b "~{tumor_bam}|~{normal_bam}" \
-            -c 1 -S 2 -E 3 -g 4 ~{interval_bed} \
-            -th ~{cores} | \
-        /opt/VarDictJava/build/install/VarDict/bin/testsomatic.R | \
-        /opt/VarDictJava/build/install/VarDict/bin/var2vcf_paired.pl \
-            -N "~{tumor_sample_name}|~{normal_sample_name}" \
+        samtools index ~{tumor_bam}
+        bedtools makewindows -b ~{interval_bed} -w 20250 -s 20000 > ~{basename(interval_bed, ".bed")}_windows.bed
+        split -d --additional-suffix .bed -n l/16 ~{basename(interval_bed, ".bed")}_windows.bed splitBed.
+
+        nProcs=~{cores}
+        nJobs="\j"
+
+        for fName in splitBed.*.bed; do
+            # Wait until nJobs < nProcs, only start nProcs jobs at most
+            echo ${nJobs@P}
+            while (( ${nJobs@P} >= nProcs )); do
+                wait -n
+            done
+
+            part=$(echo $fName | cut -d'.' -f2)
+
+            echo ${fName}
+            echo ${part}
+
+            /opt/VarDictJava/build/install/VarDict/bin/VarDict \
+                -U -G ~{reference} \
+                -X 1 \
+                -f ~{min_var_freq} \
+                -N ~{tumor_sample_name} \
+                -b "~{tumor_bam}|~{normal_bam}" \
+                -c 1 -S 2 -E 3 -g 4 ${fName} \
+                -th ~{cores} \
+                --deldupvar -Q 10 -F 0x700 --fisher > result.${part}.txt &
+        done;
+        # Wait for all running jobs to finish
+        wait
+
+        for fName in result.*.txt; do
+            cat ${fName} >> resultCombine.txt
+        done;
+
+        cat resultCombine.txt | /opt/VarDictJava/build/install/VarDict/bin/var2vcf_valid.pl \
+            -N -b "~{tumor_bam}|~{normal_bam}" \
             -f ~{min_var_freq} > ~{output_name}.vcf
 
         /usr/bin/bgzip ~{output_name}.vcf && /usr/bin/tabix ~{output_name}.vcf.gz
@@ -2441,18 +2771,22 @@ task bcftoolsFilterBcbio {
         String filter_string
         String? output_vcf_prefix = "bcftools_filter"
         String output_type = "z"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + 2*round(size(vcf, "GB"))
-    Int cores = 1
+    Float data_size = size([vcf, vcf_tbi], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       cpu: cores
       docker: "kboltonlab/bst:latest"
-      memory: "6GB"
-      bootDiskSizeGb: space_needed_gb
+      memory: cores * memory + "GB"
       disks: "local-disk ~{space_needed_gb} SSD"
       preemptible: preemptible
       maxRetries: maxRetries
@@ -2461,14 +2795,53 @@ task bcftoolsFilterBcbio {
     String ff = if filter_flag == "include" then "-i" else "-e"
     command <<<
         /usr/local/bin/bcftools filter ~{ff} "~{filter_string}" ~{vcf} --output-type ~{output_type} --output ~{output_vcf_prefix}.vcf.gz -s "BCBIO" -m+
-
         /usr/local/bin/tabix ~{output_vcf_prefix}.vcf.gz
-
     >>>
 
     output {
         File filtered_vcf = "~{output_vcf_prefix}.vcf.gz"
         File filtered_vcf_tbi = "~{output_vcf_prefix}.vcf.gz.tbi"
+    }
+}
+
+task lofreq_indelqual {
+    input {
+        File reference
+        File reference_fai
+        File tumor_bam
+        File tumor_bam_bai
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
+    }
+
+    Float reference_size = size([reference, reference_fai], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+    Int preemptible = 1
+    Int maxRetries = 0
+
+    runtime {
+        docker: "kboltonlab/lofreq:latest"
+        memory: cores * memory + "GB"
+        cpu: cores
+        bootDiskSizeGb: space_needed_gb
+        disks: "local-disk ~{space_needed_gb} SSD"
+        preemptible: preemptible
+        maxRetries: maxRetries
+    }
+
+    command <<<
+        samtools index ~{tumor_bam}
+        /opt/lofreq/bin/lofreq indelqual --dindel -f ~{reference} -o output.indel.bam ~{tumor_bam}
+        samtools index output.indel.bam
+    >>>
+
+    output {
+        File output_indel_qual_bam = "output.indel.bam"
+        File output_indel_qual_bai = "output.indel.bam.bai"
     }
 }
 
@@ -2480,18 +2853,22 @@ task lofreqTumorOnly {
         File tumor_bam_bai
         File interval_bed
         String? output_name = "lofreq.vcf"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 4
-    Float reference_size = size([reference, reference_fai], "GB")
-    Float bam_size = size([tumor_bam, tumor_bam_bai], "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_bed, "GB"))
+    Float reference_size = size([reference, reference_fai, interval_bed], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         docker: "kboltonlab/lofreq:latest"
-        memory: "24GB"
+        memory: cores * memory + "GB"
         cpu: cores
         bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
@@ -2500,9 +2877,8 @@ task lofreqTumorOnly {
     }
 
     command <<<
-        /opt/lofreq/bin/lofreq indelqual --dindel -f ~{reference} -o output.indel.bam ~{tumor_bam}
-        samtools index output.indel.bam
-        /opt/lofreq/bin/lofreq call-parallel --pp-threads ~{cores} -A -B -f ~{reference} --call-indels --bed ~{interval_bed} -o ~{output_name} output.indel.bam --force-overwrite
+        /opt/lofreq/bin/lofreq call-parallel --pp-threads ~{cores} -A -B -f ~{reference} --call-indels --bed ~{interval_bed} -o unsorted.~{output_name} ~{tumor_bam} --force-overwrite
+        cat unsorted.~{output_name} | awk '$1 ~ /^#/ {print $0;next} {print $0 | "sort -k1,1 -k2,2n"}' > ~{output_name}
         bgzip ~{output_name} && tabix ~{output_name}.gz
     >>>
 
@@ -2523,18 +2899,22 @@ task lofreqNormal {
         File? normal_bam_bai
         File interval_bed
         String? output_name = "lofreq"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 4
-    Float reference_size = size([reference, reference_fai], "GB")
-    Float bam_size = size([tumor_bam, tumor_bam_bai, normal_bam, normal_bam_bai], "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_bed, "GB"))
+    Float reference_size = size([reference, reference_fai, interval_bed], "GB")
+    Float data_size = size([tumor_bam, tumor_bam_bai, normal_bam, normal_bam_bai], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         docker: "kboltonlab/lofreq:latest"
-        memory: "24GB"
+        memory: cores * memory + "GB"
         cpu: cores
         bootDiskSizeGb: space_needed_gb
         disks: "local-disk ~{space_needed_gb} SSD"
@@ -2543,8 +2923,7 @@ task lofreqNormal {
     }
 
     command <<<
-        /opt/lofreq/bin/lofreq indelqual --dindel -f ~{reference} -o output.indel.bam ~{tumor_bam}
-        /opt/lofreq/bin/lofreq somatic --call-indels -n ~{normal_bam} -t output.indel.bam -f ~{reference} -l ~{interval_bed} -o lofreq_ --threads ~{cores}
+        /opt/lofreq/bin/lofreq somatic --call-indels -n ~{normal_bam} -t ~{tumor_bam} -f ~{reference} -l ~{interval_bed} -o lofreq_ --threads ~{cores}
         tabix lofreq_somatic_final.snvs.vcf.gz
         tabix lofreq_somatic_final.indels.vcf.gz
         bcftools concat -a lofreq_somatic_final.snvs.vcf.gz lofreq_somatic_final.indels.vcf.gz > ~{output_name}.vcf
@@ -2561,17 +2940,22 @@ task lofreqReformat {
     input {
         File vcf
         String tumor_sample_name
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + 2*round(size(vcf, "GB"))
-    Int cores = 1
+    Float data_size = size(vcf, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       cpu: cores
       docker: "quay.io/biocontainers/samtools:1.11--h6270b1f_0"
-      memory: "6GB"
+      memory: cores * memory + "GB"
       bootDiskSizeGb: space_needed_gb
       disks: "local-disk ~{space_needed_gb} SSD"
       preemptible: preemptible
@@ -2609,24 +2993,31 @@ task pindelNormal {
         String? normal_sample_name
         String? chromosome
         Int insert_size = 400
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 4
-    Int space_needed_gb = 10 + round(size([reference, reference_fai, reference_dict, normal_bam, normal_bam_bai, tumor_bam, tumor_bam_bai, region_file], "GB"))
+    Float data_size = size([normal_bam, normal_bam_bai, tumor_bam, tumor_bam_bai], "GB")
+    Float reference_size = size([reference, reference_fai, reference_dict, region_file], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
     Int preemptible = 1
     Int maxRetries = 5
 
     runtime {
-        bootDiskSizeGb: 100
+        bootDiskSizeGb: space_needed_gb
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
         docker: "mgibio/cle:v1.4.2"
-        memory: "24GB"
+        memory: cores * memory + "GB"
         preemptible: preemptible
         maxRetries: maxRetries
     }
 
     command <<<
+        samtools index ~{tumor_bam}
         echo -e "~{normal_bam}\t~{insert_size}\t~{normal_sample_name}" > pindel.config
         echo -e "~{tumor_bam}\t~{insert_size}\t~{tumor_sample_name}" >> pindel.config
 
@@ -2655,24 +3046,31 @@ task pindelTumorOnly {
         String tumor_sample_name
         String? chromosome
         Int insert_size = 400
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 4
     Int preemptible = 1
     Int maxRetries = 5
-    Int space_needed_gb = 10 + round(size([reference, reference_fai, reference_dict, tumor_bam, tumor_bam_bai, region_file], "GB"))
+    Float data_size = size([tumor_bam, tumor_bam_bai], "GB")
+    Float reference_size = size([reference, reference_fai, reference_dict, region_file], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
 
     runtime {
-        bootDiskSizeGb: 100
+        bootDiskSizeGb: space_needed_gb
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
         docker: "mgibio/cle:v1.4.2"
-        memory: "24GB"
+        memory: cores * memory + "GB"
         preemptible: preemptible
         maxRetries: maxRetries
     }
 
     command <<<
+        /usr/bin/samtools ~{tumor_bam}
         echo -e "~{tumor_bam}\t~{insert_size}\t~{tumor_sample_name}" >> pindel.config
 
         /usr/bin/pindel -i pindel.config -w 30 -T ~{cores} -o all -f ~{reference} \
@@ -2692,16 +3090,22 @@ task pindelTumorOnly {
 task catOut {
   input {
     Array[File] pindel_outs
+    Int? disk_size_override
+    Int? mem_limit_override
+    Int? cpu_override
   }
 
-  Int cores = 1
   Int preemptible = 1
   Int maxRetries = 0
   Int space_needed_gb = 10 + round(size(pindel_outs, "GB")*2)
+  Float memory = select_first([mem_limit_override, ceil(size(pindel_outs, "GB")/6 + 5)]) # We want the base to be around 6
+  Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+
   runtime {
-    memory: "6GB"
+    memory: cores * memory + "GB"
     docker: "ubuntu:bionic"
     disks: "local-disk ~{space_needed_gb} SSD"
+    bootDiskSizeGb: space_needed_gb
     cpu: cores
     preemptible: preemptible
     maxRetries: maxRetries
@@ -2728,15 +3132,23 @@ task pindelToVcf {
         Int? min_supporting_reads = 3
         String? output_name = "pindel.vcf"
         String tumor_sample_name
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
-    Int cores = 1
+
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = 10 + round(size([reference, reference_fai, reference_dict, pindel_output_summary], "GB"))
+    Float data_size = size([reference, reference_fai, reference_dict, pindel_output_summary], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
+
     runtime {
-      memory: "6GB"
+      memory: cores * memory + "GB"
       docker: "mgibio/cle:v1.3.1"
       disks: "local-disk ~{space_needed_gb} SSD"
+      bootDiskSizeGb: space_needed_gb
       cpu: cores
       preemptible: preemptible
       maxRetries: maxRetries
@@ -2764,17 +3176,23 @@ task pindelSomaticFilter {
         File reference_fai
         File reference_dict
         File pindel_output_summary
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = 10 + round(size([reference, reference_fai, reference_dict, pindel_output_summary], "GB"))
+    Float data_size = size([reference, reference_fai, reference_dict, pindel_output_summary], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
-        memory: "6GB"
+        memory: cores * memory + "GB"
         docker: "mgibio/cle:v1.3.1"
         disks: "local-disk ~{space_needed_gb} SSD"
+        bootDiskSizeGb: space_needed_gb
         cpu: cores
         preemptible: preemptible
         maxRetries: maxRetries
@@ -2793,15 +3211,20 @@ task pindelSomaticFilter {
 task removeEndTags {
     input {
         File vcf
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
     Int preemptible = 1
     Int maxRetries = 0
-    Int space_needed_gb = 10 + round(size(vcf, "GB")*2)
+    Float data_size = size(vcf, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
 
     runtime {
-        memory: "6GB"
+        memory: cores * memory + "GB"
         docker: "kboltonlab/bst:latest"
         disks: "local-disk ~{space_needed_gb} SSD"
         cpu: cores
@@ -2830,18 +3253,24 @@ task createFakeVcf {
     input {
         File vcf
         String tumor_sample_name
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 1
-    Int space_needed_gb = 10 + round(2*size(vcf, "GB"))
+    Float data_size = size(vcf, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         docker: "quay.io/biocontainers/samtools:1.11--h6270b1f_0"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         cpu: cores
         disks: "local-disk ~{space_needed_gb} SSD"
+        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
@@ -2868,16 +3297,21 @@ task mergeVcf {
         Array[File] vcfs
         Array[File] vcf_tbis
         String merged_vcf_basename = "merged"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + round(2*(size(vcfs, "GB") + size(vcf_tbis, "GB")))
-    Int cores = 1
+    Float data_size = size(vcfs, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         docker: "kboltonlab/bst:latest"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         disks: "local-disk ~{space_needed_gb} SSD"
         cpu: cores
         preemptible: preemptible
@@ -2907,18 +3341,24 @@ task fpFilter {
         String output_vcf_basename = "fpfilter"
         String sample_name = "TUMOR"
         Float? min_var_freq = 0.05
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + round(size(vcf, "GB")*2 + size([reference, reference_fai, reference_dict, bam], "GB"))
-    Int cores = 1
+    Float data_size = size(vcf, "GB")
+    Float reference_size = size([reference, reference_fai, reference_dict, bam], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
-        memory: "6GB"
-        bootDiskSizeGb: 25
+        memory: cores * memory + "GB"
         docker: "kboltonlab/fp_filter-wdl"
         disks: "local-disk ~{space_needed_gb} SSD"
+        bootDiskSizeGb: space_needed_gb
         cpu: cores
         preemptible: preemptible
         maxRetries: maxRetries
@@ -2949,29 +3389,32 @@ task mskGetBaseCounts {
         File vcf
         Int? mapq = 5
         Int? baseq = 5
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int cores = 4
     Float reference_size = size([reference, reference_fai, reference_dict], "GB")
-    Float bam_size = size([normal_bam.left, normal_bam.right], "GB")
-    Float vcf_size = size(vcf, "GB")
-    Int space_needed_gb = 10 + round(reference_size + 2*bam_size + vcf_size)
+    Float data_size = size([normal_bam.left, normal_bam.right, vcf], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size + reference_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       docker: "kboltonlab/msk_getbasecounts:3.0"
       cpu: cores
-      memory: "24GB"
+      memory: cores * memory + "GB"
       disks: "local-disk ~{space_needed_gb} SSD"
+      bootDiskSizeGb: space_needed_gb
       preemptible: preemptible
       maxRetries: maxRetries
     }
 
     command <<<
         echo "REFERENCE: ~{reference_size}"
-        echo "BAM: ~{bam_size}"
-        echo "VCF: ~{vcf_size}"
+        echo "BAM: ~{data_size}"
         echo "SPACE_NEEDED: ~{space_needed_gb}"
 
         sample_name=$(samtools view -H ~{normal_bam.left} | grep '^@RG' | sed "s/.*SM:\([^\t]*\).*/\1/g" | uniq)
@@ -3016,16 +3459,21 @@ task bcftoolsMerge {
         Array[File] vcfs
         Array[File] vcf_tbis
         String merged_vcf_basename = "merged"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + round(2*(size(vcfs, "GB") + size(vcf_tbis, "GB")))
-    Int cores = 1
+    Float data_size = size(vcfs, "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
         docker: "kboltonlab/bst:latest"
-        memory: "6GB"
+        memory: cores * memory + "GB"
         disks: "local-disk ~{space_needed_gb} SSD"
         cpu: cores
         preemptible: preemptible
@@ -3064,22 +3512,27 @@ task vep {
         String pick = "flag_pick"
         String additional_args = "--pick_order canonical,rank,mane,ccds,appris,tsl,biotype,length --merged --buffer_size 1000 --af_gnomad"
         File? synonyms_file
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
     Float cache_size = 3*size(cache_dir_zip, "GB")  # doubled to unzip
     Float vcf_size = 2*size(vcf, "GB")  # doubled for output vcf
     Float reference_size = size([reference, reference_fai, reference_dict], "GB")
     Float splice_AI_size = size([spliceAI_files.spliceAI_indel, spliceAI_files.spliceAI_snv], "GB")
-    Int space_needed_gb = 50 + round(reference_size + vcf_size + cache_size + splice_AI_size +size(synonyms_file, "GB"))
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + cache_size + vcf_size + reference_size + splice_AI_size + size(synonyms_file, "GB"))])
+    Float memory = select_first([mem_limit_override, ceil(vcf_size/2 + 8)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*4 else 4])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
-        memory: "64GB"
-        bootDiskSizeGb: 30
-        cpu: 4
+        memory: cores * memory + "GB"
+        cpu: cores
         docker: "kboltonlab/ic_vep"
         disks: "local-disk ~{space_needed_gb} SSD"
+        bootDiskSizeGb: space_needed_gb
         preemptible: preemptible
         maxRetries: maxRetries
     }
@@ -3087,8 +3540,8 @@ task vep {
     String annotated_path = basename(basename(vcf, ".gz"), ".vcf") + "_annotated.vcf"
     String cache_dir = basename(cache_dir_zip, ".zip")
     Int annotation_len = length(custom_annotations)
-    File spliceAI_snv = spliceAI_files.spliceAI_snv
-    File spliceAI_indel = spliceAI_files.spliceAI_indel
+    File spliceAI_snv = select_first([spliceAI_files.spliceAI_snv])
+    File spliceAI_indel = select_first([spliceAI_files.spliceAI_indel])
 
     command <<<
         if [[ ~{annotation_len} -ge 1 ]]; then
@@ -3148,19 +3601,25 @@ task normalFisher {
         File pon_tbi
         String caller = "caller"
         String? p_value = "0.05"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
 
-    Int space_needed_gb = 10 + round(size([vcf, pon, pon_tbi], "GB"))
-    Int cores = 1
+    Float data_size = size([vcf, pon, pon_tbi], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       cpu: cores
       docker: "kboltonlab/sam_bcftools_tabix_bgzip:1.0"
-      memory: "6GB"
+      memory: cores * memory + "GB"
       disks: "local-disk ~{space_needed_gb} SSD"
+      bootDiskSizeGb: space_needed_gb
       preemptible: preemptible
       maxRetries: maxRetries
     }
@@ -3349,15 +3808,20 @@ task annotateVcf {
         File vep_tbi
         String caller_prefix
         String sample_name
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Int space_needed_gb = 10 + 2*round(size([vcf, vcf_tbi, fp_filter, fp_filter_tbi, vep], "GB"))
-    Int cores = 1
+    Float data_size = size([vcf, vcf_tbi, fp_filter, fp_filter_tbi, vep], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + 2 * data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
-      memory: "6GB"
+      memory: cores * memory + "GB"
       docker: "kboltonlab/bst"
       disks: "local-disk ~{space_needed_gb} SSD"
       bootDiskSizeGb: space_needed_gb
@@ -3407,21 +3871,26 @@ task annotatePD {
         File truncating
         File cosmic_dir_zip
         String? pon_pvalue = "2.114164905e-6"
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
     Float caller_size = size([mutect_vcf, lofreq_vcf, vardict_vcf], "GB")
     Float file_size = size([bolton_bick_vars, mut2_bick, mut2_kelly, matches2, TSG_file, oncoKB_curated, pd_annotation_file, truncating], "GB")
     Float cosmic_size = 3*size(cosmic_dir_zip, "GB")
-    Int space_needed_gb = 20 + round(caller_size + file_size + cosmic_size)
-    Int cores = 2
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + caller_size + file_size + cosmic_size)])
+    Float memory = select_first([mem_limit_override, ceil(file_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18)*2 else 2])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       cpu: cores
       docker: "kboltonlab/r_docker_ichan:latest"
-      memory: "12GB"
+      memory: cores * memory + "GB"
       disks: "local-disk ~{space_needed_gb} SSD"
+      bootDiskSizeGb: space_needed_gb
       preemptible: preemptible
       maxRetries: maxRetries
     }
@@ -3504,18 +3973,22 @@ task xgb_model {
         String? pon_pvalue = "2.114164905e-6"
         Boolean model = true
         String tumor_sample_name
+        Int? disk_size_override
+        Int? mem_limit_override
+        Int? cpu_override
     }
 
-    Float caller_size = size([mutect_tsv, lofreq_tsv, vardict_tsv, pindel_full_vcf, pon], "GB")
-    Int space_needed_gb = 10 + round(caller_size)
-    Int cores = 1
+    Float data_size = size([mutect_tsv, lofreq_tsv, vardict_tsv, pindel_full_vcf, pon], "GB")
+    Int space_needed_gb = select_first([disk_size_override, ceil(10 + data_size)])
+    Float memory = select_first([mem_limit_override, ceil(data_size/6 + 5)]) # We want the base to be around 6
+    Int cores = select_first([cpu_override, if memory > 36.0 then floor(memory / 18) else 1])
     Int preemptible = 1
     Int maxRetries = 0
 
     runtime {
       cpu: cores
       docker: "kboltonlab/xgb:ic_patch"
-      memory: "6GB"
+      memory: cores * memory + "GB"
       disks: "local-disk ~{space_needed_gb} SSD"
       preemptible: preemptible
       maxRetries: maxRetries
