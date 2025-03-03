@@ -171,9 +171,9 @@ workflow boltonlab_CH {
         Boolean? pilot = false
     }
 
- if (!is_umi_concensus_unaligned) { #we could start with unaligned but umi concensus bam
-    # If the BAM file is already aligned and consensus sequencing was done, then alignment can be skipped
+ 
     if (!aligned) {
+        if (!is_umi_concensus_unaligned) {
         # If the input is BAM, we need to check prune reads that have bad UMI information
         if (platform == 'ArcherDX') {
             if (bam_input) {
@@ -218,6 +218,7 @@ workflow boltonlab_CH {
                 platform = platform
             }
         }
+        
 
         if (has_umi) {
             # Removes UMIs from Reads and adds them as RX Tag
@@ -271,9 +272,9 @@ workflow boltonlab_CH {
                 bam = select_first([archer_fastq_to_bam.bam, fastq_to_bam.bam, unaligned_bam]),
             }
         }
-    }
+       }
+    
 
- }
         # Realign the Consensus Called Reads
         call realign {
             input:
@@ -320,8 +321,8 @@ workflow boltonlab_CH {
                 umi_paired = umi_paired
             }
         }
-    
-  
+      
+    }
 
     # Applies BQSR on specific intervals defined by the User, if aligned BAM is provided, starts here
     call bqsrApply as bqsr {
@@ -457,6 +458,7 @@ workflow boltonlab_CH {
     call intervalsToBed as interval_to_bed {
         input: interval_list = target_intervals
     }
+    
 
     # Perform Somalier
 #    call createSomalierVcf {
@@ -1504,6 +1506,9 @@ task filterClipAndCollectMetrics {
         else
             echo "Sample not UMI Paired" > duplex_seq.metrics.txt
         fi
+
+        rm consensus_filtered.bam
+        rm consensus_filtered.bai
     >>>
 
     output {
@@ -2321,7 +2326,7 @@ task vardictTumorOnly {
         Float? min_var_freq = 0.005
     }
 
-    Int cores = 16
+    Int cores = 4
     Float reference_size = size([reference, reference_fai], "GB")
     Float bam_size = size([tumor_bam, tumor_bam_bai], "GB")
     Int space_needed_gb = 10 + round(reference_size + 2*bam_size + size(interval_bed, "GB"))
@@ -2512,6 +2517,8 @@ task lofreqTumorOnly {
         samtools index output.indel.bam
         /opt/lofreq/bin/lofreq call-parallel --pp-threads ~{cores} -A -B -f ~{reference} --call-indels --bed ~{interval_bed} -o ~{output_name} output.indel.bam --force-overwrite
         bgzip ~{output_name} && tabix ~{output_name}.gz
+        rm output.indel.bam
+        rm output.indel.bam.bai
     >>>
 
     output {
@@ -3140,6 +3147,8 @@ task vep {
         ${custom_annotation}
 
         bgzip ~{annotated_path} && tabix ~{annotated_path}.gz
+
+        rm -rf vep_zip/
     >>>
 
     output {
