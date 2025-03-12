@@ -1,0 +1,42 @@
+flowchart TD
+    start([Genetic Variant]) --> isTSG{Is it in a TSG?}
+    
+    isTSG -->|Yes| variantType{Variant Type?}
+    isTSG -->|No| geneSpecific{Gene-Specific Rules?}
+    
+    variantType -->|Nonsense| pd1[putative]
+    variantType -->|Missense| missenseEvidence{Evidence?}
+    variantType -->|Splice Acceptor/Donor| pd15[putative]
+    variantType -->|Extension of Termination Codon| pd14[putative]
+    variantType -->|Synonymous in Splicing Region| spliceAI[Evaluate with SpliceAI]
+    
+    missenseEvidence -->|COSMIC Support| pd5[putative]
+    missenseEvidence -->|Bick/Bolton Loci Count + SIFT & PolyPhen| pd6[putative]
+    missenseEvidence -->|Near Hotspot + SIFT & PolyPhen| pd7[putative]
+    missenseEvidence -->|Bick/Bolton AA Support + Either SIFT or PolyPhen| pd13[putative]
+    
+    geneSpecific -->|SRSF2| srsf2Rules{Hotspot or OncoKB support} --> pd8a[putative]
+    geneSpecific -->|SF3B1| sf3b1Rules{Hotspot} -->pd17[putative]
+    geneSpecific -->|IDH1/IDH2| idhRules{Hotspot} -->pd18[putative]
+    geneSpecific -->|JAK2| jak2Rules{OncoKB support} -->pd19[putative]
+    geneSpecific -->|PPM1D| ppm1dRules{Nonsense Mutation on Exon 6} -->pd20[putative]
+    
+    start --> oncoKB{OncoKB Status?}
+    
+    oncoKB -->|Reviewed by Pathologists| pd2[putative]
+    oncoKB -->|No Support + TSG| pd4[not putative]
+    oncoKB -->|'Neutral' but Bick/Bolton Support| useBB[Use Bick/Bolton Evidence]
+    
+    start --> clinVar{ClinVar Support?}
+    clinVar -->|Yes + TSG| pd16[putative]
+    
+    classDef positive fill:#d1f5d3,stroke:#82c985
+    classDef negative fill:#f5d3d3,stroke:#c98282
+    classDef decision fill:#d3e5f5,stroke:#82a9c9
+    classDef start fill:#f0f0f0,stroke:#999
+    
+    class pd1,pd2,pd5,pd6,pd7,pd8a,pd8b,pd13,pd14,pd15,pd16,useBB,pd17,pd18,pd19,pd20 positive
+    class pd4 negative
+    class isTSG,variantType,missenseEvidence,geneSpecific,oncoKB,clinVar,srsf2Rules,sf3b1Rules,idhRules,jak2Rules,ppm1dRules decision
+    class start,spliceAI start
+
